@@ -1,7 +1,7 @@
 import functools as ft
 import math
 import warnings
-from typing import Literal, Optional, overload, Tuple, Union
+from typing import Literal, Optional, Tuple, Union, overload
 
 import jax
 import jax.lax as lax
@@ -22,6 +22,7 @@ def dot_product_attention_weights(
     mask: Optional[Bool[Array, "q_seq kv_seq"]] = None,
 ) -> Float[Array, "q_seq kv_seq"]:
     query = query / math.sqrt(query.shape[-1])
+    print(f"{query.shape=}, {key.shape=}")
     logits = jnp.einsum("sd,Sd->sS", query, key)
     if mask is not None:
         if mask.shape != logits.shape:
@@ -45,11 +46,27 @@ def dot_product_attention(
     key: Optional[PRNGKey] = None,
     inference: Optional[bool] = None,
 ) -> Float[Array, "q_seq v_size"]:
+    print(f"dot_product_attention: {query.shape=}, {key_.shape=}, {value.shape=}")
     weights = dot_product_attention_weights(query, key_, mask)
+    print(f"{weights.shape=}")
     if dropout is not None:
         weights = dropout(weights, key=key, inference=inference)
     attn = jnp.einsum("sS,Sd->sd", weights, value)
     return attn
+
+
+def vmapped_fn(query_heads, key_slice, value_slice, dropout, inference, mask, keys):
+    attn_fn = ft.partial(
+        dot_product_attention, dropout=dropout, inference=inference, key=keys, mask=mask
+    )
+    print(f"{query_heads.shape=}, {key_slice.shape=}, {value_slice.shape=}")
+    # Batch `keys` down its first axis as it is passed as a keyword argument.
+    dpa = jax.vmap(
+        lambda q, k, v: attn_fn(q, k, v),
+        in_axes=(1, None, None),
+        out_axes=1,
+    )(query_heads, key_slice, value_slice)
+    return dpa
 
 
 class MultiheadAttention(Module):
@@ -135,6 +152,9 @@ class MultiheadAttention(Module):
         refer to it as "$d_\text{model}$".
     """
 
+    m_query_proj: Linear
+    m_key_proj: Linear
+    m_value_proj: Linear
     query_proj: Linear
     key_proj: Linear
     value_proj: Linear
@@ -157,6 +177,9 @@ class MultiheadAttention(Module):
     use_key_bias: bool = static_field()
     use_value_bias: bool = static_field()
     use_output_bias: bool = static_field()
+    key_multihead_dim: Optional[int] = static_field()
+    value_multihead_dim: Optional[int] = static_field()
+    query_multihead_dim: Optional[int] = static_field()
 
     def __init__(
         self,
@@ -167,8 +190,11 @@ class MultiheadAttention(Module):
         value_size: Optional[int] = None,
         output_size: Optional[int] = None,
         key_multihead: bool = True,
+        key_multihead_dim: Optional[int] = None,
         value_multihead: bool = True,
+        value_multihead_dim: Optional[int] = None,
         query_multihead: bool = True,
+        query_multihead_dim: Optional[int] = None,
         state_length: Optional[int] = None,
         qk_size: Optional[int] = None,
         vo_size: Optional[int] = None,
@@ -279,12 +305,32 @@ class MultiheadAttention(Module):
         query_proj_out_size = qk_size
         key_proj_out_size = qk_size
         value_proj_out_size = vo_size
+
+        m_query_proj_out_size = qk_size
+        m_key_proj_out_size = qk_size
+        m_value_proj_out_size = vo_size
+
         if query_multihead:
             query_proj_out_size = query_proj_out_size * num_heads
         if key_multihead:
             key_proj_out_size = key_proj_out_size * num_heads
         if value_multihead:
             value_proj_out_size = value_proj_out_size * num_heads
+
+        query_multihead_dim = (
+            num_heads if query_multihead_dim is None else query_multihead_dim
+        )
+        key_multihead_dim = (
+            num_heads if key_multihead_dim is None else key_multihead_dim
+        )
+        value_multihead_dim = (
+            num_heads if value_multihead_dim is None else value_multihead_dim
+        )
+
+        m_query_proj_out_size *= query_multihead_dim
+        m_key_proj_out_size *= key_multihead_dim
+        m_value_proj_out_size *= value_multihead_dim
+
         self.query_proj = Linear(
             query_size, query_proj_out_size, use_bias=use_query_bias, key=qkey
         )
@@ -294,6 +340,19 @@ class MultiheadAttention(Module):
         self.value_proj = Linear(
             value_size, value_proj_out_size, use_bias=use_value_bias, key=vkey
         )
+
+        self.m_query_proj = Linear(
+            query_size, m_query_proj_out_size, use_bias=use_query_bias, key=qkey
+        )
+
+        self.m_key_proj = Linear(
+            key_size, m_key_proj_out_size, use_bias=use_key_bias, key=kkey
+        )
+
+        self.m_value_proj = Linear(
+            value_size, m_value_proj_out_size, use_bias=use_value_bias, key=vkey
+        )
+
         self.output_proj = Linear(
             vo_size * num_heads, output_size, use_bias=use_output_bias, key=okey
         )
@@ -315,6 +374,9 @@ class MultiheadAttention(Module):
         self.use_value_bias = use_value_bias
         self.use_output_bias = use_output_bias
         self.state_length = state_length
+        self.key_multihead_dim = key_multihead_dim
+        self.value_multihead_dim = value_multihead_dim
+        self.query_multihead_dim = query_multihead_dim
 
     @overload
     def __call__(
@@ -439,6 +501,35 @@ class MultiheadAttention(Module):
         key_heads = self._project(self.key_proj, self.key_multihead, key_)
         value_heads = self._project(self.value_proj, self.value_multihead, value)
 
+        print(
+            f"{self.query_multihead_dim=}, {self.key_multihead_dim=}, {self.value_multihead_dim=}"
+        )
+
+        m_query_heads = self._new_project(
+            self.m_query_proj, self.query_multihead_dim, query
+        )
+        m_key_heads = self._new_project(self.m_key_proj, self.key_multihead_dim, key_)
+        m_value_heads = self._new_project(
+            self.m_value_proj, self.value_multihead_dim, value
+        )
+        print(f"{m_query_heads.shape=}, {m_key_heads.shape=}, {m_value_heads.shape=}")
+        print(f"{query_heads.shape=}, {key_heads.shape=}, {value_heads.shape=}")
+
+        if not self.query_multihead:
+            assert jnp.allclose(query_heads, m_query_heads.reshape(query_heads.shape))
+        else:
+            assert jnp.allclose(query_heads, m_query_heads)
+
+        if not self.key_multihead:
+            assert jnp.allclose(key_heads, m_key_heads.reshape(key_heads.shape))
+        else:
+            assert jnp.allclose(key_heads, m_key_heads)
+
+        if not self.value_multihead:
+            assert jnp.allclose(value_heads, m_value_heads.reshape(value_heads.shape))
+        else:
+            assert jnp.allclose(value_heads, m_value_heads)
+
         if state is sentinel:
             causal_mask_offset = 0
         else:
@@ -482,12 +573,35 @@ class MultiheadAttention(Module):
             1 if self.value_multihead else None,
             0 if mask is not None and mask.ndim == 3 else None,
         )
-        # Batch `keys` down its first axis as it is passed as a keyword argument.
+        print(f"{in_axes=}")
         attn = jax.vmap(attn_fn, in_axes=in_axes, out_axes=1, axis_size=self.num_heads)(
             query_heads, key_heads, value_heads, mask, key=keys
         )
 
+        # Batch `keys` down its first axis as it is passed as a keyword argument.
+        print(f"{m_query_heads.shape=}, {m_key_heads.shape=}, {m_value_heads.shape=}")
+        pt_vmapped_fn = ft.partial(
+            vmapped_fn,
+            dropout=self.dropout,
+            inference=inference,
+            mask=mask,
+            keys=keys,
+        )
+        result = jax.vmap(pt_vmapped_fn, in_axes=(None, 1, 1), out_axes=1)(
+            m_query_heads, m_key_heads, m_value_heads
+        )
+        print(f"{result.shape=}")
+        result_sum = jnp.sum(result, axis=1)
+        print(f"{result_sum.shape=}")
+        # Taking the mean over the d dimension
+        result_mean = result_sum / self.key_multihead_dim
+        print(f"{result_mean.shape=}")
+
+        assert jnp.allclose(result_mean, attn)
+
+        print(f"attn before reshape {attn.shape=}")
         attn = attn.reshape(query_seq_length, self.num_heads * self.vo_size)
+        print(f"attn after reshape {attn.shape=}")
         out = jax.vmap(self.output_proj)(attn)
 
         if state is sentinel:
@@ -502,6 +616,17 @@ class MultiheadAttention(Module):
             _, projection_size = projection.shape
             size_per_head = projection_size // self.num_heads
             projection = projection.reshape(seq_length, self.num_heads, size_per_head)
+        return projection
+
+    def _new_project(self, proj, multihead: int | None, x):
+        seq_length, _ = x.shape
+        projection = jax.vmap(proj)(x)
+
+        if multihead is not None:
+            _, projection_size = projection.shape
+            size_per_head = projection_size // multihead
+            projection = projection.reshape(seq_length, multihead, size_per_head)
+
         return projection
 
 
