@@ -10,6 +10,9 @@ import time
 import sys 
 from tinyshakespeareloader.hamlet import get_data
 import optax
+import wandb
+
+
 # ic.disable()
 
 query_input_dim = 16
@@ -171,7 +174,7 @@ def generate_text(
     print()    
 
 def main():
-
+    
     MAX_T = 128
     data = get_data(batch_size=batch_size, block_size=MAX_T)
 
@@ -220,9 +223,24 @@ def main():
     )
     # start_loss = evaluate(transformer, test_dataloader)
     # print(f"{start_loss=}")
-    optimiser = optax.adamw(learning_rate=3e-4)
+    learning_rate = 3e-4
+    optimiser = optax.adamw(learning_rate=learning_rate)
     opt_state = optimiser.init(eqx.filter(transformer, eqx.is_inexact_array))
     generate_text(transformer, decode, max_seq_len=MAX_T)
+
+    wandb.init(
+    # set the wandb project where this run will be logged
+        project="MultiheadAttention Test",
+        # track hyperparameters and run metadata
+        config={
+        "learning_rate": learning_rate,
+        "architecture": "transformer",
+        "dataset": "Tiny Shakespeare",
+        "training_steps": 5000
+        }
+    )
+
+
     ic("starting training")
     start_time = time.time()
     for i, (x, y) in enumerate(train_dataloader):
@@ -231,8 +249,8 @@ def main():
         key, subkey = jax.random.split(key)
         transformer, opt_state, loss = step(transformer, opt_state, optimiser, x, y, key=subkey)
         if i % 100 == 0:
-            eval_loss = evaluate(transformer, test_dataloader)
-            ic(i, loss, eval_loss)
+            eval_loss = evaluate(transformer, test_dataloader) 
+            wandb.log({"train_loss": loss, "eval_loss": eval_loss})
         if i % 1000 == 0:
             generate_text(transformer, decode, max_seq_len=MAX_T)
         if i == 5000:
