@@ -1,7 +1,7 @@
 import functools as ft
 import math
 import warnings
-from typing import Literal, Optional, Tuple, Union, overload
+from typing import Literal, Optional, overload, Tuple, Union
 
 import jax
 import jax.lax as lax
@@ -44,7 +44,7 @@ def dot_product_attention(
     *,
     key: Optional[PRNGKey] = None,
     inference: Optional[bool] = None,
-) -> Float[Array, "q_seq v_size"]: 
+) -> Float[Array, "q_seq v_size"]:
     weights = dot_product_attention_weights(query, key_, mask)
     if dropout is not None:
         weights = dropout(weights, key=key, inference=inference)
@@ -52,10 +52,12 @@ def dot_product_attention(
     return attn
 
 
-def vmapped_attention(query_heads, key_heads, value_heads, dropout, inference, mask, keys):
+def vmapped_attention(
+    query_heads, key_heads, value_heads, dropout, inference, mask, keys
+):
     attn_fn = ft.partial(
         dot_product_attention, dropout=dropout, inference=inference, key=keys, mask=mask
-    ) 
+    )
     # Batch `keys` down its first axis as it is passed as a keyword argument.
     dpa = jax.vmap(
         lambda q, k, v: attn_fn(q, k, v),
@@ -160,7 +162,7 @@ class MultiheadAttention(Module):
     key_size: int = static_field()
     value_size: int = static_field()
     output_size: int = static_field()
-    
+
     state_length: Optional[int] = static_field()
     qk_size: int = static_field()
     vo_size: int = static_field()
@@ -168,7 +170,7 @@ class MultiheadAttention(Module):
     use_key_bias: bool = static_field()
     use_value_bias: bool = static_field()
     use_output_bias: bool = static_field()
-    
+
     query_multihead_dim: int = static_field()
     kv_multihead_dim: int = static_field()
 
@@ -291,14 +293,11 @@ class MultiheadAttention(Module):
         key_proj_out_size = qk_size
         value_proj_out_size = vo_size
 
-        
         query_multihead_dim = (
             num_heads if query_multihead_dim is None else query_multihead_dim
         )
-        kv_multihead_dim = (
-            num_heads if kv_multihead_dim is None else kv_multihead_dim
-        )
-        
+        kv_multihead_dim = num_heads if kv_multihead_dim is None else kv_multihead_dim
+
         query_proj_out_size = query_proj_out_size * query_multihead_dim
         key_proj_out_size = key_proj_out_size * kv_multihead_dim
         value_proj_out_size = value_proj_out_size * kv_multihead_dim
@@ -457,7 +456,7 @@ class MultiheadAttention(Module):
         # query_heads = self._project(self.query_proj, self.query_multihead, query)
         # key_heads = self._project(self.key_proj, self.key_multihead, key_)
         # value_heads = self._project(self.value_proj, self.value_multihead, value)
-        
+
         query_heads = jax.vmap(self.query_proj)(query)
         query_embedding_dim = query_heads.shape[-1] // self.query_multihead_dim
         query_heads = query_heads.reshape(
@@ -510,15 +509,18 @@ class MultiheadAttention(Module):
                 mask = mask & unwritten_mask
 
         keys = None if key is None else jax.random.split(key, self.num_heads)
-        if self.query_multihead_dim == self.num_heads and self.kv_multihead_dim == self.num_heads:
+        if (
+            self.query_multihead_dim == self.num_heads
+            and self.kv_multihead_dim == self.num_heads
+        ):
             # Normal multi-head attention
             attn_fn = ft.partial(
                 dot_product_attention, dropout=self.dropout, inference=inference
             )
             in_axes = (1, 1, 1, 0 if mask is not None and mask.ndim == 3 else None)
-            attn = jax.vmap(attn_fn, in_axes=in_axes, out_axes=1, axis_size=self.num_heads)(
-                query_heads, key_heads, value_heads, mask, key=keys
-            )
+            attn = jax.vmap(
+                attn_fn, in_axes=in_axes, out_axes=1, axis_size=self.num_heads
+            )(query_heads, key_heads, value_heads, mask, key=keys)
         else:
             pt_vmapped_attention = ft.partial(
                 vmapped_attention,
@@ -530,11 +532,11 @@ class MultiheadAttention(Module):
             attn = jax.vmap(pt_vmapped_attention, in_axes=(None, 1, 1), out_axes=1)(
                 query_heads, key_heads, value_heads
             )
-        
+
             attn = jnp.sum(attn, axis=1)
             # Taking the mean over the d dimension
             attn = attn / self.kv_multihead_dim
-        
+
         attn = attn.reshape(query_seq_length, self.num_heads * self.vo_size)
         out = jax.vmap(self.output_proj)(attn)
 
