@@ -26,15 +26,15 @@ KVCacheCallable = Callable[
 
 
 class StandardKVCache(Module):
-    """
-    A class to manage the key and value caches for a transformer
-    model with autoregressive decoding.
+    """Holds a key and value cache; its forward pass handles updating this cache.
+
+    Useful for transformer models with autoregressive decoding.
     """
 
     key_shape: tuple[int, int, int] = field(static=True)
     value_shape: tuple[int, int, int] = field(static=True)
 
-    autoregressive_index: StateIndex
+    kv_cache_index: StateIndex
 
     def __init__(
         self,
@@ -51,13 +51,12 @@ class StandardKVCache(Module):
         - `key_size`: Number of input channels for key $K$.
         - `value_size`: Number of input channels for value $V$.
         - `dtype` (optional): The data type of the KV caches.
-
         """
         dtype = default_floating_dtype() if dtype is None else dtype
         self.key_shape = state_length, num_heads, key_size
         self.value_shape = state_length, num_heads, value_size
 
-        self.autoregressive_index = StateIndex(
+        self.kv_cache_index = StateIndex(
             (
                 jnp.empty(self.key_shape, dtype=dtype),
                 jnp.empty(self.value_shape, dtype=dtype),
@@ -78,24 +77,25 @@ class StandardKVCache(Module):
     ]:
         """**Arguments:**
 
-        - `key_heads`: The new key heads to be added to the cache
-        - `value_heads`: The new value heads to be added to the cache
-        - `state`: The current state containing the index for autoregressive decoding
+        - `key_heads`: The new key heads to be added to the cache.
+        - `value_heads`: The new value heads to be added to the cache.
+        - `state`: The current state containing the index for autoregressive decoding.
+            This is created using the [stateful API](./stateful.md). See also the
+            example in [`equinox.nn.MultiheadAttention`][].
 
         **Returns:**
 
-        A tuple (key_state, value_state, index, state) containing the updated keys
-        and values as well as the index and the new state.
-        The shape of `key_state` is `(state_length num_heads qk_size)`
-        and the shape of `value_state` is `(state_length num_heads vo_size)`.
+        A tuple `(key_state, value_state, state)` containing the updated keys and
+        values, as well as the new state.
 
+        The shape of `key_state` is `(state_length, num_heads, qk_size)`
+        and the shape of `value_state` is `(state_length, num_heads, vo_size)`.
         """
-        kv_seq_length, _, _ = key_heads.shape
-        key_state, value_state = state.get(self.autoregressive_index)
+        key_state, value_state = state.get(self.kv_cache_index)
         key_state = lax.dynamic_update_slice_in_dim(key_state, key_heads, index, axis=0)
         value_state = lax.dynamic_update_slice_in_dim(
             value_state, value_heads, index, axis=0
         )
-        state = state.set(self.autoregressive_index, (key_state, value_state))
+        state = state.set(self.kv_cache_index, (key_state, value_state))
 
         return key_state, value_state, state

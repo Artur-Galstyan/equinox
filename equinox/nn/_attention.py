@@ -118,6 +118,44 @@ class MultiheadAttention(Module, strict=True):
         $d_\text{qk}$ is their "$d_k$". Our $d_\text{vo}$ is their "$d_\text{v}$". They
         fix $d_\text{query} = d_\text{key} = d_\text{value} = d_\text{output}$ and
         refer to it as "$d_\text{model}$".
+
+    !!! info
+
+        The following shows an example of how to use `MultiheadAttention` for
+        autoregressive decoding with a `kv_cache` and `state`. See also
+        [`equinox.nn.StandardKVCache`][], which this uses.
+
+        ```python
+        import equinox as eqx
+        import jax
+
+        # the length of the KV buffer we'll save into
+        state_length = 256
+        # normal attention hyperparameters
+        query_size = 6
+        num_heads = 1
+
+        standard_kv_cache = eqx.nn.StandardKVCache(
+            state_length=state_length,
+            num_heads=num_heads,
+            key_size=query_size,
+            value_size=query_size
+        )
+
+        attn, state = eqx.nn.make_with_state(eqx.nn.MultiheadAttention)(
+            query_size=query_size,
+            num_heads=num_heads,
+            kv_cache=standard_kv_cache,
+            key=jax.random.key(0)
+        )
+
+        # We observe a sequence of length 50, split up into 3 irregular pieces.
+        x1 = jax.numpy.ones(shape=(3, query_size))
+        x2 = jax.numpy.ones(shape=(42, query_size))
+        x3 = jax.numpy.ones(shape=(5, query_size))
+        for x in [x1, x2, x3]:
+            output, state = attn(x, x, x, mask="causal", state=state)
+        ```
     """
 
     query_proj: Linear
@@ -125,7 +163,6 @@ class MultiheadAttention(Module, strict=True):
     value_proj: Linear
     output_proj: Linear
     dropout: Dropout
-
     kv_cache: Optional[KVCacheCallable]
     index: Optional[StateIndex]
 
@@ -185,46 +222,11 @@ class MultiheadAttention(Module, strict=True):
         - `dtype`: The dtype to use for all trainable parameters in this layer.
             Defaults to either `jax.numpy.float32` or `jax.numpy.float64` depending
             on whether JAX is in 64-bit mode.
-        - `kv_cache`: The callable module to handle KV caching.
+        - `kv_cache`: A callable to handle key-value caching. Typically an
+            [`equinox.nn.StandardKVCache`][], but this flexibility supports custom
+            caching strategies if desired.
         - `key`: A `jax.random.PRNGKey` used to provide randomness for parameter
             initialisation. (Keyword only argument.)
-
-
-
-        !!! info
-
-        The following shows an example of how to use `MultiheadAttention` for
-        autoregressive decoding with a `kv_cache` and `state`
-        (see [`equinox.nn.StandardKVCache`][]):
-        ```python
-        import equinox as eqx
-        import jax
-
-        seq_len = 3
-
-        state_length = 8
-        num_heads = 1
-        query_size = 6
-
-        standard_kv_cache = eqx.nn.StandardKVCache(
-            state_length=state_length,
-            num_heads=num_heads,
-            key_size=query_size,
-            value_size=query_size
-        )
-
-        mha, state = eqx.nn.make_with_state(MultiheadAttention)(
-            query_size=query_size,
-            num_heads=num_heads,
-            kv_cache=standard_kv_cache,
-            key=jax.random.key(0)
-
-        )
-
-        for states in range(state_length):
-            x = jax.numpy.ones(shape=(seq_len, query_size))
-            y, state = mha(x, x, x, mask="causal", state=state)
-        ```
         """
         dtype = default_floating_dtype() if dtype is None else dtype
         qkey, kkey, vkey, okey = jrandom.split(key, 4)
@@ -265,6 +267,11 @@ class MultiheadAttention(Module, strict=True):
             key=okey,
         )
         self.dropout = Dropout(dropout_p, inference=inference)
+        self.kv_cache = kv_cache
+        if kv_cache is None:
+            self.index = None
+        else:
+            self.index = StateIndex(jnp.zeros((), default_int_dtype()))
 
         self.num_heads = num_heads
         self.query_size = query_size
@@ -277,13 +284,6 @@ class MultiheadAttention(Module, strict=True):
         self.use_key_bias = use_key_bias
         self.use_value_bias = use_value_bias
         self.use_output_bias = use_output_bias
-        self.kv_cache = kv_cache
-        if self.kv_cache is not None:
-            self.index = StateIndex(
-                jnp.zeros((), default_int_dtype()),
-            )
-        else:
-            self.index = None
 
     @jax.named_scope("eqx.nn.MultiheadAttention")
     def __call__(
@@ -413,10 +413,9 @@ class MultiheadAttention(Module, strict=True):
     def _handle_kv_cache(self, key_heads, value_heads, index, query_seq_length, state):
         if self.kv_cache is None:
             raise ValueError(
-                "State was provided, but cannot use autoregressive decoding "
-                "without specifying "
-                "`MultiheadAttention(..., kv_cache=...)`. "
-                "See `equinox.nn.StandardKVCache` for an example."
+                "State was provided, but cannot use autoregressive decoding without "
+                "specifying `MultiheadAttention(..., kv_cache=...)`. See "
+                "`equinox.nn.StandardKVCache` for an example."
             )
 
         key_state, value_state, state = self.kv_cache(
