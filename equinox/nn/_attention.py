@@ -4,7 +4,7 @@ import typing
 import warnings
 from collections.abc import Callable
 from functools import partial
-from typing import cast, TYPE_CHECKING
+from typing import cast, Literal, TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
@@ -157,6 +157,8 @@ class MultiheadAttention(Module):
     use_key_bias: bool = field(static=True)
     use_value_bias: bool = field(static=True)
     use_output_bias: bool = field(static=True)
+    use_flash_attn: bool = field(static=True)
+    implementation: Literal["xla", "cudnn"] | None = field(static=True)
 
     def __init__(
         self,
@@ -174,6 +176,8 @@ class MultiheadAttention(Module):
         dropout_p: float = 0.0,
         inference: bool = False,
         dtype=None,
+        use_flash_attn: bool = False,
+        implementation: Literal["xla", "cudnn"] | None = None,
         *,
         key: PRNGKeyArray,
     ):
@@ -255,6 +259,8 @@ class MultiheadAttention(Module):
         self.use_key_bias = use_key_bias
         self.use_value_bias = use_value_bias
         self.use_output_bias = use_output_bias
+        self.use_flash_attn = use_flash_attn
+        self.implementation = implementation
 
     @named_scope("eqx.nn.MultiheadAttention")
     def __call__(
@@ -333,20 +339,34 @@ class MultiheadAttention(Module):
                     "process_heads must not change the shape of the heads."
                 )
 
-        attn_fn = partial(
-            dot_product_attention, dropout=self.dropout, inference=inference
-        )
-        keys = None if key is None else jax.random.split(key, query_heads.shape[1])
-        if mask is not None and mask.ndim == 3:
-            # Batch `mask` and `keys` down their 0-th dimension.
-            attn = jax.vmap(attn_fn, in_axes=1, out_axes=1)(
-                query_heads, key_heads, value_heads, mask=mask, key=keys
+        if self.use_flash_attn:
+            if mask is not None and mask.ndim == 2:
+                mask = jnp.broadcast_to(mask, (self.num_heads, *mask.shape))
+            q = query_heads.astype(jnp.bfloat16)
+            k = key_heads.astype(jnp.bfloat16)
+            v = value_heads.astype(jnp.bfloat16)
+            attn = jax.nn.dot_product_attention(
+                q,
+                k,
+                v,
+                mask=mask,
+                implementation=self.implementation,
             )
         else:
-            # Batch `keys` down its 0-th dimension.
-            attn = jax.vmap(ft.partial(attn_fn, mask=mask), in_axes=1, out_axes=1)(
-                query_heads, key_heads, value_heads, key=keys
+            attn_fn = partial(
+                dot_product_attention, dropout=self.dropout, inference=inference
             )
+            keys = None if key is None else jax.random.split(key, query_heads.shape[1])
+            if mask is not None and mask.ndim == 3:
+                # Batch `mask` and `keys` down their 0-th dimension.
+                attn = jax.vmap(attn_fn, in_axes=1, out_axes=1)(
+                    query_heads, key_heads, value_heads, mask=mask, key=keys
+                )
+            else:
+                # Batch `keys` down its 0-th dimension.
+                attn = jax.vmap(ft.partial(attn_fn, mask=mask), in_axes=1, out_axes=1)(
+                    query_heads, key_heads, value_heads, key=keys
+                )
         attn = attn.reshape(query_seq_length, -1)
 
         return jax.vmap(self.output_proj)(attn)
