@@ -4,7 +4,17 @@ import equinox as eqx
 import equinox.internal as eqxi
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
+from equinox._errors import _get_message
+
+
+def test_get_message_numpy():
+    msgs = ["first", "second"]
+    assert _get_message(np.array(True), np.array(1), msgs) == "second"
+    assert _get_message(np.array([True, False, True]), np.array([0, 0, 1]), msgs) == (
+        "Batch index (0,) had error:\nfirst\n\nBatch index (2,) had error:\nsecond"
+    )
 
 
 def _f(x):

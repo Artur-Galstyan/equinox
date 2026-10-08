@@ -11,7 +11,6 @@ import jax.core
 import jax.lax as lax
 import jax.tree_util as jtu
 import numpy as np
-import numpy.typing as npt
 from jaxtyping import Array, ArrayLike, Bool, Int, PyTree
 
 from . import _jit
@@ -73,8 +72,8 @@ class _EquinoxRuntimeError(RuntimeError):
 
 
 def _get_message(
-    pred: Bool[npt.ArrayLike, "*shape"],
-    message_index: Int[npt.ArrayLike, "*shape"],
+    pred: Bool[ArrayLike, "*shape"],
+    message_index: Int[ArrayLike, "*shape"],
     msgs: list[str],
 ) -> str:
     pred = np.asarray(pred)
@@ -216,7 +215,7 @@ if EQX_ON_ERROR == "breakpoint":
 
         return fixed_jit_impl
 
-    jax.jit = fixed_jit
+    jax.jit = fixed_jit  # ty:ignore[invalid-assignment]
 
 
 # Remove the `on_error` argument from the public API for now. If you pass

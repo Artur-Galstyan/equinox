@@ -87,9 +87,9 @@ def field(
     if static:
         metadata["static"] = True
     if default is not dataclasses.MISSING:
-        metadata["default"] = default
+        kwargs["default"] = default
     if default_factory is not None:
-        metadata["default_factory"] = default_factory
+        kwargs["default_factory"] = default_factory
     return dataclasses.field(metadata=metadata, **kwargs)
 
 
