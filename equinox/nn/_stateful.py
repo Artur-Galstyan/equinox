@@ -249,7 +249,7 @@ class State:
         if isinstance(self._state, _Sentinel):
             return wl.TextDoc("State(~old~)")
         else:
-            docs = wl.named_objs(self._state.items(), **kwargs)  # pyright: ignore
+            docs = wl.named_objs(self._state.items(), **kwargs)  # pyright: ignore  # ty:ignore[invalid-argument-type]
             return wl.bracketed(
                 begin=wl.TextDoc("State("),
                 docs=docs,

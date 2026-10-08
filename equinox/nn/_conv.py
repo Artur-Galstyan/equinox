@@ -18,10 +18,10 @@ _T = TypeVar("_T")
 
 
 def _ntuple(n: int) -> Callable[[_T | Sequence[_T]], tuple[_T, ...]]:
-    def parse(x: _T | Sequence[_T]) -> tuple[_T, ...]:
+    def parse(x: _T | Sequence[_T]) -> tuple[_T, ...]:  # ty:ignore[invalid-return-type]
         if isinstance(x, Sequence):
             if len(x) == n:
-                return tuple(x)
+                return tuple(x)  # ty:ignore[invalid-return-type]
             else:
                 raise ValueError(
                     f"Length of {x} (length = {len(x)}) is not equal to {n}"
@@ -48,13 +48,13 @@ def _padding_init(
         if all_sequences(padding):
             padding = tuple(padding)  # pyright: ignore
         else:
-            padding = tuple((p, p) for p in padding)
+            padding = tuple((p, p) for p in padding)  # ty:ignore[invalid-assignment]
     else:
         raise ValueError(
             "`padding` must either be a string, an int, or tuple of length "
             f"{num_spatial_dims} containing ints or tuples of length 2."
         )
-    return padding  # pyright: ignore
+    return padding  # pyright: ignore  # ty:ignore[invalid-return-type]
 
 
 def _padding_mode_init(padding_mode: str) -> str:

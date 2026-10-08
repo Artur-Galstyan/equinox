@@ -79,6 +79,8 @@ class Embedding(Module):
                     "weight must have shape (num_embeddings, embedding_size)."
                 )
             self.weight = weight
+        assert num_embeddings is not None
+        assert embedding_size is not None
         self.num_embeddings = num_embeddings
         self.embedding_size = embedding_size
 
@@ -233,7 +235,7 @@ class RotaryPositionalEmbedding(Module):
 
             freqs_cos, freqs_sin = internal_rope_embedding_cache[cache_key]
             freqs_seq_len, _ = freqs_cos.shape
-            if min_required_seq_len > freqs_seq_len:  # pyright: ignore
+            if min_required_seq_len > freqs_seq_len:  # pyright: ignore  # ty:ignore[unsupported-operator]
                 internal_rope_embedding_cache[cache_key] = self.precompute_freqs_cis(
                     embedding_size, min_required_seq_len, self.theta, self.dtype
                 )

@@ -4,7 +4,7 @@ import jax
 import pytest
 
 
-typing.TESTING = True  # pyright: ignore
+typing.TESTING = True  # pyright: ignore  # ty:ignore[unresolved-attribute]
 
 
 jax.config.update("jax_numpy_dtype_promotion", "strict")

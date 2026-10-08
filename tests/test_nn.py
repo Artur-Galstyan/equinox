@@ -11,13 +11,13 @@ from jax._src.dtypes import TypePromotionError
 
 def test_custom_init():
     with pytest.raises(TypeError):
-        eqx.nn.Linear(3, 4)  # pyright: ignore
+        eqx.nn.Linear(3, 4)  # pyright: ignore  # ty:ignore[missing-argument]
 
     with pytest.raises(TypeError):
-        eqx.nn.Linear(3)  # pyright: ignore
+        eqx.nn.Linear(3)  # pyright: ignore  # ty:ignore[missing-argument]
 
     with pytest.raises(TypeError):
-        eqx.nn.Linear(out_features=4)  # pyright: ignore
+        eqx.nn.Linear(out_features=4)  # pyright: ignore  # ty:ignore[missing-argument]
 
 
 def test_linear(getkey):
@@ -344,8 +344,8 @@ def test_mlp_learnt_activation():
         key=jrandom.PRNGKey(5678),
     )
     x = jnp.array([0.5, 0.7])
-    assert mlp.activation.negative_slope.shape == (2, 8)  # pyright: ignore
-    assert mlp.final_activation.negative_slope.shape == (5,)  # pyright: ignore
+    assert mlp.activation.negative_slope.shape == (2, 8)  # pyright: ignore  # ty:ignore[unresolved-attribute]
+    assert mlp.final_activation.negative_slope.shape == (5,)  # pyright: ignore  # ty:ignore[unresolved-attribute]
 
     @eqx.filter_jit
     @eqx.filter_grad
@@ -369,8 +369,8 @@ def test_scan_over_mlp_learnt_activation():
         key=jrandom.PRNGKey(5678),
     )
     x = jnp.array([0.5, 0.7])
-    assert mlp.activation.negative_slope.shape == (2, 8)
-    assert mlp.final_activation.negative_slope.shape == (5,)
+    assert mlp.activation.negative_slope.shape == (2, 8)  # ty:ignore[unresolved-attribute]
+    assert mlp.final_activation.negative_slope.shape == (5,)  # ty:ignore[unresolved-attribute]
 
     @eqx.filter_jit
     @eqx.filter_grad

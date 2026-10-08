@@ -8,6 +8,8 @@ def field(
     *,
     converter: Callable[[Any], Any] | None = None,
     static: bool = False,
+    default: Any = dataclasses.MISSING,
+    default_factory: Callable[[], Any] | None = None,
     **kwargs: Any,
 ) -> Any:
     """Equinox supports extra functionality on top of the default dataclasses.
@@ -22,6 +24,10 @@ def field(
         If `converter` is `None`, then no converter is registered.
     - `static`: whether the field should not interact with any JAX transform at all (by
         making it part of the PyTree structure rather than a leaf).
+    - `default`: the default value for this field. If not provided, then the field is
+        required.
+    - `default_factory`: a function to call to provide the default value for this field.
+        If not provided, then `default` is used.
     - `**kwargs`: All other keyword arguments are passed on to `dataclass.field`.
 
     !!! example "Example for `converter`"
@@ -80,6 +86,10 @@ def field(
         metadata["converter"] = converter
     if static:
         metadata["static"] = True
+    if default is not dataclasses.MISSING:
+        metadata["default"] = default
+    if default_factory is not None:
+        metadata["default_factory"] = default_factory
     return dataclasses.field(metadata=metadata, **kwargs)
 
 
