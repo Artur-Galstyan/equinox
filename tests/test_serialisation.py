@@ -122,22 +122,22 @@ def test_helpful_errors(getkey, tmp_path):
 
 def test_generic_dtype_serialisation(getkey, tmp_path):
     # Ensure we can round trip when we start with an array
-    jax_array = jnp.array(bfloat16(1))
+    jax_array = jnp.array(bfloat16(1))  # pyright: ignore[reportCallIssue]
     eqx.tree_serialise_leaves(tmp_path, jax_array)
-    like_jax_array = jnp.array(bfloat16(2))
+    like_jax_array = jnp.array(bfloat16(2))  # pyright: ignore[reportCallIssue]
     loaded_jax_array = eqx.tree_deserialise_leaves(tmp_path, like_jax_array)
     assert jax_array.item() == loaded_jax_array.item()
 
     tree = (
         jnp.array(1e-8),
-        bfloat16(1e-8),
+        bfloat16(1e-8),  # pyright: ignore[reportCallIssue]
         np.float32(1e-8),
         jnp.array(1e-8),
         np.float64(1e-8),
     )
     like_tree = (
         jnp.array(2.0),
-        bfloat16(2),
+        bfloat16(2),  # pyright: ignore[reportCallIssue]
         np.float32(2),
         jnp.array(2.0),
         np.float64(2.0),
@@ -239,12 +239,16 @@ def test_stateful(tmp_path):
         norm1: eqx.nn.BatchNorm
         norm2: eqx.nn.BatchNorm
 
-    model = Model(eqx.nn.BatchNorm(3, "hi"), eqx.nn.BatchNorm(4, "bye"))
+    model = Model(
+        eqx.nn.BatchNorm(3, "hi", mode="ema"), eqx.nn.BatchNorm(4, "bye", mode="ema")
+    )
     state = eqx.nn.State(model)
 
     eqx.tree_serialise_leaves(tmp_path, (model, state))
 
-    model2 = Model(eqx.nn.BatchNorm(3, "hi"), eqx.nn.BatchNorm(4, "bye"))
+    model2 = Model(
+        eqx.nn.BatchNorm(3, "hi", mode="ema"), eqx.nn.BatchNorm(4, "bye", mode="ema")
+    )
     state2 = eqx.nn.State(model2)
 
     eqx.tree_deserialise_leaves(tmp_path, (model2, state2))
@@ -258,3 +262,20 @@ def test_eval_shape(getkey, tmp_path):
     model3 = eqx.tree_deserialise_leaves(tmp_path, model2)
 
     assert eqx.tree_equal(model, model3, typematch=True)
+
+
+def test_eval_shape_deserialise_to_host(getkey, tmp_path):
+    # A `filter_spec` may leave the deserialised leaves on the host, in which
+    # case they are NumPy rather than JAX arrays. That should not be treated as
+    # a change of type relative to the `ShapeDtypeStruct`s in `like`.
+    model = eqx.nn.MLP(2, 2, 2, 2, key=getkey())
+    eqx.tree_serialise_leaves(tmp_path, model)
+
+    def filter_spec(f, x):
+        return jax.device_get(eqx.default_deserialise_filter_spec(f, x))
+
+    model2 = eqx.filter_eval_shape(eqx.nn.MLP, 2, 2, 2, 2, key=getkey())
+    model3 = eqx.tree_deserialise_leaves(tmp_path, model2, filter_spec=filter_spec)
+
+    assert isinstance(model3.layers[0].weight, np.ndarray)
+    assert eqx.tree_equal(model, model3)

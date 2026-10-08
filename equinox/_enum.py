@@ -1,10 +1,11 @@
 import warnings
-from typing import Any, cast, TYPE_CHECKING, Union
+from typing import Any, cast, TYPE_CHECKING
 
 import jax._src.traceback_util as traceback_util
 import jax.core
 import jax.numpy as jnp
 import numpy as np
+import wadler_lindig as wl
 from jaxtyping import Array, ArrayLike, Bool, Int
 
 from ._doc_utils import doc_repr
@@ -127,7 +128,10 @@ following entries:
         if isinstance(item._value, jax.core.Tracer):
             return "traced"
         elif isinstance(item._value, (np.ndarray, Array)):
-            return cls._index_to_message[item._value.item()]
+            # Needs vectorization for handling vmapped enumerations
+            return str(
+                np.vectorize(lambda val: cls._index_to_message[val])(item._value)
+            )
         else:
             # PyTrees have to be generic wrt leaf type.
             return "unknown"
@@ -140,7 +144,7 @@ following entries:
 
 
 class EnumerationItem(Module):
-    _value: Int[Union[Array, np.ndarray], ""]
+    _value: Int[Array | np.ndarray[Any, np.dtype[np.signedinteger]], ""]
     # Should have annotation `"type[Enumeration]"`, but this fails due to beartype bug
     # #289.
     _enumeration: Any = field(static=True)
@@ -167,6 +171,10 @@ class EnumerationItem(Module):
         raise ValueError(
             "Can only compare equality between enumerations of the same type."
         )
+
+    def __pdoc__(self, **kwargs):
+        del kwargs
+        return wl.TextDoc(repr(self))
 
     def __repr__(self):
         prefix = f"{self._enumeration.__module__}.{self._enumeration.__qualname__}"
@@ -201,8 +209,7 @@ class EnumerationItem(Module):
 
 if TYPE_CHECKING:
     import enum
-    from typing import ClassVar
-    from typing_extensions import Self
+    from typing import ClassVar, Self
 
     class _Sequence(type):
         def __getitem__(cls, item) -> str: ...
@@ -212,7 +219,7 @@ if TYPE_CHECKING:
     class Enumeration(enum.Enum, EnumerationItem, metaclass=_Sequence):  # pyright: ignore
         _name_to_item: ClassVar[dict[str, EnumerationItem]]  # pyright: ignore
         _index_to_message: ClassVar[list[str]]  # pyright: ignore
-        _base_offsets: ClassVar[dict["Enumeration", int]]
+        _base_offsets: ClassVar[dict["Enumeration", int]]  # pyright: ignore
 
         @classmethod
         def promote(cls, item: "Enumeration") -> Self: ...

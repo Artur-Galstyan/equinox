@@ -3,10 +3,9 @@ unbatched, or not differentiated, etc.
 """
 
 import functools as ft
-from typing import Optional
 
 import jax
-import jax.core
+import jax.extend.core
 import jax.interpreters.ad as ad
 import jax.interpreters.batching as batching
 import jax.interpreters.mlir as mlir
@@ -29,7 +28,7 @@ def _make_error(opname):
     return _error
 
 
-nontraceable_p = jax.core.Primitive("nontraceable")
+nontraceable_p = jax.extend.core.Primitive("nontraceable")
 nontraceable_p.def_impl(_nontraceable_impl)
 nontraceable_p.def_abstract_eval(_nontraceable_impl)
 ad.primitive_jvps[nontraceable_p] = _make_error("differentiation")
@@ -53,7 +52,7 @@ def nontraceable(x, *, name="nontraceable operation"):
     return combine(dynamic, static)
 
 
-nondifferentiable_backward_p = jax.core.Primitive("nondifferentiable_backward")
+nondifferentiable_backward_p = jax.extend.core.Primitive("nondifferentiable_backward")
 
 
 def _nondifferentiable_backward_batch(x, batch_axes, *, msg, symbolic):
@@ -108,8 +107,8 @@ mlir.register_lowering(
 
 def nondifferentiable_backward(
     x: PyTree,
-    name: Optional[str] = None,
-    msg: Optional[str] = None,
+    name: str | None = None,
+    msg: str | None = None,
     symbolic: bool = True,
 ) -> PyTree:
     """Identity function. Raises an error if it is differentiated in reverse mode."""
@@ -127,17 +126,17 @@ def nondifferentiable_backward(
 def _cannot_batch(x, b, *, msg, allow_constant_across_batch):
     (x,) = x
     (b,) = b
-    if b is batching.not_mapped:
+    if b is None:
         return x, b
     else:
         if allow_constant_across_batch:
             x = error_if(x, jnp.min(x, axis=b) != jnp.max(x, axis=b), msg)
-            return jnp.take(x, 0, axis=b), batching.not_mapped
+            return jnp.take(x, 0, axis=b), None
         else:
             raise ValueError(msg)
 
 
-nonbatchable_p = jax.core.Primitive("nonbatchable")
+nonbatchable_p = jax.extend.core.Primitive("nonbatchable")
 nonbatchable_p.def_impl(lambda x, *, msg, allow_constant_across_batch: x)
 nonbatchable_p.def_abstract_eval(lambda x, *, msg, allow_constant_across_batch: x)
 batching.primitive_batchers[nonbatchable_p] = _cannot_batch
@@ -152,8 +151,8 @@ mlir.register_lowering(
 def nonbatchable(
     x: PyTree,
     *,
-    name: Optional[str] = None,
-    msg: Optional[str] = None,
+    name: str | None = None,
+    msg: str | None = None,
     allow_constant_across_batch: bool = False,
 ) -> PyTree:
     """Identity function. Raises a trace-time assert if it is batched."""

@@ -1,9 +1,10 @@
 import functools as ft
 from collections.abc import Callable
-from typing import Any, Optional, Union
+from typing import Any
 
 import jax
 import jax.core
+import jax.extend.core
 import jax.interpreters.ad as ad
 import jax.interpreters.batching as batching
 import jax.interpreters.mlir as mlir
@@ -81,25 +82,25 @@ def _is_none(x):
     return x is None
 
 
-def _is_not_mapped(x):
-    return x is batching.not_mapped
+def _is_unmapped(x):
+    return x is None
 
 
 def _move_to_front(input, batch_axis):
-    if batch_axis is batching.not_mapped:
+    if batch_axis is None:
         return input
     else:
         return jnp.swapaxes(input, 0, batch_axis)
 
 
 def _int_to_zero(batch_axis):
-    if batch_axis is batching.not_mapped:
-        return batch_axis
+    if batch_axis is None:
+        return None
     else:
         return 0
 
 
-@ft.lru_cache(maxsize=None)
+@ft.cache
 def _get_callback(treedef, static, is_float0):
     @ft.partial(jax.jit, static_argnums=0)
     def callback(static_fn, dynamic):
@@ -181,7 +182,7 @@ class _MetaTransposeTransform(Module):
 
 
 class _MetaBatchTransform(Module):
-    batch_axes: PyTree[Union[batching.NotMapped, int]]  # pyright: ignore
+    batch_axes: PyTree[int | None]
 
     def __call__(self, static_fn):
         return filter_vmap(static_fn, in_axes=(self.batch_axes,))
@@ -258,7 +259,7 @@ def _noinline_batch(inputs, batch_axes):
     dynamic_index, abstract_fn, transforms, args = inputs
     dynamic_index_bdim, abstract_fn_bdim, transforms_bdim, args_bdim = batch_axes
     assert len(jtu.tree_leaves((abstract_fn_bdim, transforms_bdim))) == 0  # all none
-    if dynamic_index_bdim is not batching.not_mapped:
+    if dynamic_index_bdim is not None:
         # The batch rule for `lax.cond` with vmap'd predicate simply
         # broadcasts all constants in the branches. In particular it may broadcast
         # this. We simply need to ignore this and return to having a single dynamic
@@ -270,8 +271,8 @@ def _noinline_batch(inputs, batch_axes):
         assert jnp.ndim(dynamic_index) == 1
         dynamic_index = dynamic_index[0]
     del dynamic_index_bdim, abstract_fn_bdim, transforms_bdim
-    args = jtu.tree_map(_move_to_front, args, args_bdim, is_leaf=_is_not_mapped)
-    args_bdim = jtu.tree_map(_int_to_zero, args_bdim, is_leaf=_is_not_mapped)
+    args = jtu.tree_map(_move_to_front, args, args_bdim, is_leaf=_is_unmapped)
+    args_bdim = jtu.tree_map(_int_to_zero, args_bdim, is_leaf=_is_unmapped)
     out = filter_primitive_bind(
         noinline_p,
         dynamic_index,
@@ -330,7 +331,7 @@ def _noinline_mlir(ctx, *dynamic, treedef, static, flatten, **kwargs):
     return result
 
 
-noinline_p = jax.core.Primitive("noinline")
+noinline_p = jax.extend.core.Primitive("noinline")
 noinline_p.multiple_results = True
 noinline_p.def_impl(_noinline_impl)
 noinline_p.def_abstract_eval(_noinline_abstract)
@@ -345,7 +346,7 @@ _index_to_fn = []
 
 
 class _NoInlineWrapper(Module):
-    dynamic_index: Int[Union[Array, np.ndarray], ""]
+    dynamic_index: Int[Array | np.ndarray, ""]
     abstract_fn: Callable = field(static=True)
     dynamic_fn: Any
 
@@ -363,7 +364,7 @@ class _NoInlineWrapper(Module):
         )
 
 
-def noinline(fn: Callable, abstract_fn: Optional[Callable] = None) -> Callable:  # pyright: ignore
+def noinline(fn: Callable, abstract_fn: Callable | None = None) -> Callable:  # pyright: ignore
     """Marks a function as not being inlined into a larger computation.
     This can help to reduce compile time at the expense of increased runtime.
 

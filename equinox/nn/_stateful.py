@@ -1,15 +1,16 @@
 import types
 from collections.abc import Callable
-from typing import Any, Generic, TYPE_CHECKING, TypeVar, Union
+from typing import Any, Generic, TYPE_CHECKING, TypeVar
 from typing_extensions import ParamSpec
 
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
+import wadler_lindig as wl
 from jaxtyping import PyTree
 
 from .._module import field, Module
-from .._pretty_print import bracketed, named_objs, text, tree_pformat
+from .._pretty_print import tree_pformat
 from .._tree import tree_at, tree_equal
 
 
@@ -18,7 +19,18 @@ _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
 
-class StateIndex(Module, Generic[_Value], strict=True):
+class _Sentinel(Module):
+    """A module for sentinels that can be passed dynamically."""
+
+    pass
+
+
+# Used as a sentinel in two ways: keeping track of updated `State`s, and keeping track
+# of deleted initial states.
+_sentinel = _Sentinel()
+
+
+class StateIndex(Module, Generic[_Value]):
     """This wraps together (a) a unique dictionary key used for looking up a stateful
     value, and (b) how that stateful value should be initialised.
 
@@ -43,10 +55,10 @@ class StateIndex(Module, Generic[_Value], strict=True):
     [`equinox.nn.BatchNorm`][] for further reference.
     """  # noqa: E501
 
-    # Starts off as an `object` when initialised; later replaced with an `int` inside
-    # `make_with_state`.
-    marker: Union[object, int] = field(static=True)
-    init: _Value
+    # Starts off as object when initialised; later replaced with a stringified
+    # jax.tree_util.KeyPath inside `make_with_state`.
+    marker: object | str = field(static=True)
+    init: _Value | _Sentinel
 
     def __init__(self, init: _Value):
         """**Arguments:**
@@ -68,11 +80,6 @@ class StateIndex(Module, Generic[_Value], strict=True):
 
 def _is_index(x: Any) -> bool:
     return isinstance(x, StateIndex)
-
-
-# Used as a sentinel in two ways: keeping track of updated `State`s, and keeping track
-# of deleted initial states.
-_sentinel = object()
 
 
 _state_error = """
@@ -117,13 +124,13 @@ class State:
         leaves = jtu.tree_leaves(model, is_leaf=_is_index)
         for leaf in leaves:
             if _is_index(leaf):
-                if leaf.init is _sentinel:
+                if isinstance(leaf.init, _Sentinel):
                     raise ValueError(
                         "Do not call `eqx.nn.State(model)` directly. You should call "
                         "`eqx.nn.make_with_state(ModelClass)(...args...)` instead."
                     )
                 state[leaf.marker] = jtu.tree_map(jnp.asarray, leaf.init)
-        self._state = state
+        self._state: _Sentinel | dict[object | int, Any] = state
 
     def get(self, item: StateIndex[_Value]) -> _Value:
         """Given an [`equinox.nn.StateIndex`][], returns the value of its state.
@@ -136,11 +143,11 @@ class State:
 
         The current state associated with that index.
         """
-        if self._state is _sentinel:
+        if isinstance(self._state, _Sentinel):
             raise ValueError(_state_error)
         if type(item) is not StateIndex:
             raise ValueError("Can only use `eqx.nn.StateIndex`s as state keys.")
-        return self._state[item.marker]  # pyright: ignore
+        return self._state[item.marker]
 
     def set(self, item: StateIndex[_Value], value: _Value) -> "State":
         """Sets a new value for an [`equinox.nn.StateIndex`][], **and returns the
@@ -158,11 +165,11 @@ class State:
         As a safety guard against accidentally writing `state.set(item, value)` without
         assigning it to a new value, then the old object (`self`) will become invalid.
         """
-        if self._state is _sentinel:
+        if isinstance(self._state, _Sentinel):
             raise ValueError(_state_error)
         if type(item) is not StateIndex:
             raise ValueError("Can only use `eqx.nn.StateIndex`s as state keys.")
-        old_value = self._state[item.marker]  # pyright: ignore
+        old_value = self._state[item.marker]
         value = jtu.tree_map(jnp.asarray, value)
         old_struct = jax.eval_shape(lambda: old_value)
         new_struct = jax.eval_shape(lambda: value)
@@ -194,7 +201,7 @@ class State:
         A new [`equinox.nn.State`][] object, which tracks only some of the overall
         states.
         """
-        if self._state is _sentinel:
+        if isinstance(self._state, _Sentinel):
             raise ValueError(_state_error)
         leaves = jtu.tree_leaves(pytree, is_leaf=_is_index)
         markers = [x.marker for x in leaves if _is_index(x)]
@@ -218,7 +225,7 @@ class State:
         As a safety guard against accidentally writing `state.set(item, value)` without
         assigning it to a new value, then the old object (`self`) will become invalid.
         """
-        if self._state is _sentinel:
+        if isinstance(self._state, _Sentinel):
             raise ValueError(_state_error)
         if type(substate) is not State:
             raise ValueError("Can only use `eqx.nn.State`s in `update`.")
@@ -238,27 +245,21 @@ class State:
     def __repr__(self):
         return tree_pformat(self)
 
-    def __tree_pp__(self, **kwargs):
-        if self._state is _sentinel:
-            return text("State(~old~)")
+    def __pdoc__(self, **kwargs):
+        if isinstance(self._state, _Sentinel):
+            return wl.TextDoc("State(~old~)")
         else:
-            objs = named_objs(
-                [
-                    (hex(id(key)), value)
-                    for key, value in self._state.items()  # pyright: ignore
-                ],
-                **kwargs,
-            )
-            return bracketed(
-                name=text("State"),
+            docs = wl.named_objs(self._state.items(), **kwargs)  # pyright: ignore
+            return wl.bracketed(
+                begin=wl.TextDoc("State("),
+                docs=docs,
+                sep=wl.comma,
+                end=wl.TextDoc(")"),
                 indent=kwargs["indent"],
-                objs=objs,
-                lbracket="(",
-                rbracket=")",
             )
 
     def tree_flatten(self):
-        if self._state is _sentinel:
+        if isinstance(self._state, _Sentinel):
             raise ValueError(_state_error)
         keys = tuple(self._state.keys())  # pyright: ignore
         values = tuple(self._state[k] for k in keys)  # pyright: ignore
@@ -364,16 +365,15 @@ def make_with_state(make_model: Callable[_P, _T]) -> Callable[_P, tuple[_T, Stat
         def make_with_state_impl(*args, **kwargs) -> tuple[_T, State]:
             model = make_model(*args, **kwargs)
 
-            # Replace all markers with `int`s. This is needed to ensure that two calls
-            # to `make_with_state` produce compatible models and states.
-            leaves, treedef = jtu.tree_flatten(model, is_leaf=_is_index)
-            counter = 0
+            # Replace all markers with stringified key paths. This is needed to ensure
+            # that two calls to `make_with_state` produce compatible models and states.
+            key_leaves, treedef = jtu.tree_flatten_with_path(model, is_leaf=_is_index)
             new_leaves = []
-            for leaf in leaves:
+            for key, leaf in key_leaves:
                 if _is_index(leaf):
                     leaf = StateIndex(leaf.init)
-                    object.__setattr__(leaf, "marker", counter)
-                    counter += 1
+                    path_str = model.__class__.__name__ + jtu.keystr(key)
+                    object.__setattr__(leaf, "marker", path_str)
                 new_leaves.append(leaf)
             model = jtu.tree_unflatten(treedef, new_leaves)
 

@@ -3,13 +3,11 @@ import functools as ft
 import inspect
 import warnings
 from collections.abc import Callable, Hashable
-from typing import Any, Literal, Optional, overload, Union
+from typing import Any, Literal, overload
 
 import jax
 import jax._src.traceback_util as traceback_util
 import jax.core
-import jax.interpreters.batching as batching
-import jax.interpreters.pxla as pxla
 import jax.numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
@@ -31,8 +29,8 @@ from ._module import Module, module_update_wrapper, Partial, Static
 traceback_util.register_exclusion(__file__)
 
 
-ResolvedAxisSpec = Optional[int]
-AxisSpec = Union[ResolvedAxisSpec, Callable[[Any], ResolvedAxisSpec]]
+ResolvedAxisSpec = None | int
+AxisSpec = ResolvedAxisSpec | Callable[[Any], ResolvedAxisSpec]
 
 
 def _is_none(x: Any) -> bool:
@@ -74,59 +72,12 @@ class if_array:
 
     axis: int
 
-    def __call__(self, x: Any) -> Optional[int]:
+    def __call__(self, x: Any) -> int | None:
         return self.axis if is_array(x) else None
 
 
-@dataclasses.dataclass(frozen=True)  # not a pytree
-class if_mapped:
-    """Used with the `out_axes` argument of [`equinox.filter_vmap`][], to only add an
-    output batch axis if necessary.
-
-    That is, `out_axes=if_mapped(i)` is equivalent to `out_axes=i` for any output that
-    is batched, and `out_axes=None` fofr any output that is not batched.
-    """
-
-    axis: int
-
-    def __call__(self, x: Any):
-        raise RuntimeError(
-            "`eqx.internal.if_mapped` should not be called directly; it is only valid "
-            "when passed to `out_axes` of `eqx.filter_vmap`."
-        )
-
-
-@dataclasses.dataclass(frozen=True)  # not a pytree
-class _if_mapped:
-    main: Any
-    axis: int
-
-    def __call__(self, x: Any) -> Optional[int]:
-        if isinstance(x, batching.BatchTracer) and x._trace.main is self.main:
-            if x.batch_dim is batching.not_mapped:
-                return None
-            else:
-                return self.axis
-        elif isinstance(x, pxla.MapTracer) and x._trace.main is self.main:
-            return self.axis
-        else:
-            return None
-
-
-# The existence of this function is a complete hack: it couples together `filter_vmap`
-# with `if_mapped`. I don't see an obvious way around it though.
-def _bind_main(main, out_axes):
-    def _bind(axis):
-        if isinstance(axis, if_mapped):
-            return _if_mapped(main, axis.axis)
-        else:
-            return axis
-
-    return jtu.tree_map(_bind, out_axes)
-
-
-def _swapaxes(array, axis):
-    return jnp.swapaxes(array, 0, axis)
+def _moveaxis(array, axis):
+    return jnp.moveaxis(array, 0, axis)
 
 
 def _named_in_axes(fun, in_axes, args):
@@ -166,8 +117,8 @@ class _VmapWrapper(Module):
     _fun: Callable
     _in_axes: PyTree[AxisSpec]
     _out_axes: PyTree[AxisSpec]
-    _axis_name: Optional[Hashable]
-    _axis_size: Optional[int]
+    _axis_name: Hashable | None
+    _axis_size: int | None
     _vmapkwargs: dict[str, Any]
 
     @property
@@ -199,11 +150,9 @@ class _VmapWrapper(Module):
         static_args, dynamic_args = partition(args, unmapped_axis)
 
         def _fun_wrapper(_dynamic_args):
-            _main = jax.core.find_top_trace(jtu.tree_leaves(_dynamic_args)).main
             _args = combine(_dynamic_args, static_args)
             _out = self._fun(*_args)
-            _out_axes = _bind_main(_main, self._out_axes)
-            _out_axes = _resolve_axes(_out, _out_axes)
+            _out_axes = _resolve_axes(_out, self._out_axes)
             _none_axes = jtu.tree_map(_is_none, _out_axes, is_leaf=_is_none)
             _nonvmapd, _vmapd = partition(_out, _none_axes, is_leaf=_is_none)
             _nonvmapd_arr, _nonvmapd_static = partition(_nonvmapd, is_array)
@@ -230,11 +179,12 @@ class _VmapWrapper(Module):
         nonvmapd = combine(nonvmapd_arr, nonvmapd_static)
 
         assert jtu.tree_structure(vmapd) == jtu.tree_structure(out_axes)
-        vmapd = jtu.tree_map(_swapaxes, vmapd, out_axes)
+        vmapd = jtu.tree_map(_moveaxis, vmapd, out_axes)
 
         return combine(vmapd, nonvmapd)
 
     def __get__(self, instance, owner):
+        del owner
         if instance is None:
             return self
         return Partial(self, instance)
@@ -246,7 +196,7 @@ def filter_vmap(
     in_axes: PyTree[AxisSpec] = if_array(0),
     out_axes: PyTree[AxisSpec] = if_array(0),
     axis_name: Hashable = None,
-    axis_size: Optional[int] = None,
+    axis_size: int | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]: ...
 
 
@@ -257,7 +207,7 @@ def filter_vmap(
     in_axes: PyTree[AxisSpec] = if_array(0),
     out_axes: PyTree[AxisSpec] = if_array(0),
     axis_name: Hashable = None,
-    axis_size: Optional[int] = None,
+    axis_size: int | None = None,
 ) -> Callable[..., Any]: ...
 
 
@@ -268,7 +218,7 @@ def filter_vmap(
     in_axes: PyTree[AxisSpec] = if_array(0),
     out_axes: PyTree[AxisSpec] = if_array(0),
     axis_name: Hashable = None,
-    axis_size: Optional[int] = None,
+    axis_size: int | None = None,
     **vmapkwargs,
 ):
     """Vectorises a function. By default, all JAX/NumPy arrays are vectorised down their
@@ -281,22 +231,22 @@ def filter_vmap(
     over), and callables `Leaf -> Union[None, int]` are mapped and evaluated on every
     leaf of their subtree. `None` should be used for non-JAX-array arguments.
 
-    - `fun` is a pure function to vectorise. Should be of the form `fun(*args)`; that
+    - `fun`: is a pure function to vectorise. Should be of the form `fun(*args)`; that
         is to say it cannot accept keyword arguments.
-    - `in_axes` indicates which axes of the input arrays should be vectorised over.
+    - `in_axes`: indicates which axes of the input arrays should be vectorised over.
         It should be a PyTree of `None`, `int`, or callables `Leaf -> Union[None, int]`.
         Its tree structure should either be:
         1. a prefix of the input tuple of `args`.
         2. a dictionary, in which case the named arguments use the specified indices
             to vectorise over, and all other arguments will have the default
             `eqx.if_array(0)`.
-    - `out_axes` indicates which axis of the output arrays the mapped axis should appear
-        at. It should be a PyTree of `None`, `int`, or callables
+    - `out_axes`: indicates which axis of the output arrays the mapped axis
+        should appear at. It should be a PyTree of `None`, `int`, or callables
         `Leaf -> Union[None, int]`, and its tree structure should be a prefix of the
         output `fun(*args)`.
-    - `axis_name` is an optional hashable Python object used to identify the mapped
+    - `axis_name`: is an optional hashable Python object used to identify the mapped
         axis so that parallel collectives (e.g. `jax.lax.psum`) can be applied.
-    - `axis_size` is an optional `int` describing the size of the axis mapped. This
+    - `axis_size`: is an optional `int` describing the size of the axis mapped. This
         only needs to be passed if none of the input arguments are vectorised, as else
         it can be deduced by looking at the argument shapes.
 
@@ -426,7 +376,7 @@ def _filter_pmap_cache(
     max_out_size = jtu.tree_reduce(lambda x, y: max(x, y.ndim), struct_out, 0)
     del fun_abstract, struct, struct_out
 
-    def _check_map_out_axis(x: Optional[int]):
+    def _check_map_out_axis(x: int | None):
         if isinstance(x, int):
             if x < -max_out_size or x >= max_out_size:
                 raise ValueError(
@@ -439,10 +389,8 @@ def _filter_pmap_cache(
             )
 
     def fun_wrapped(_dynamic):
-        _main = jax.core.find_top_trace(jtu.tree_leaves(_dynamic))
         _fun, _args, _, _out_axes = combine(_dynamic, static)
         _out = _fun(*_args)
-        _out_axes = _bind_main(_main, _out_axes)
         _out_axes = _resolve_axes(_out, _out_axes)
         jtu.tree_map(_check_map_out_axis, _out_axes)
         _pmapd = []
@@ -473,8 +421,7 @@ def _filter_pmap_cache(
 def _common_preprocess(axis_size, kwargs):
     if len(kwargs) != 0:
         raise RuntimeError(
-            "keyword arguments cannot be used with functions wrapped with "
-            "`filter_pmap`"
+            "keyword arguments cannot be used with functions wrapped with `filter_pmap`"
         )
     if axis_size is None:
         return 0  # hashable non-array object
@@ -501,8 +448,8 @@ class _PmapWrapper(Module):
     _fun: Callable
     _in_axes: PyTree[AxisSpec]
     _out_axes: PyTree[AxisSpec]
-    _axis_name: Optional[Hashable]
-    _axis_size: Optional[int]
+    _axis_name: Hashable | None
+    _axis_size: int | None
     _filter_warning: bool
     _pmapkwargs: dict[str, Any]
 
@@ -558,6 +505,7 @@ class _PmapWrapper(Module):
         return self._call(True, args, kwargs)
 
     def __get__(self, instance, owner):
+        del owner
         if instance is None:
             return self
         return Partial(self, instance)
@@ -572,7 +520,7 @@ def filter_pmap(
     in_axes: PyTree[AxisSpec] = if_array(0),
     out_axes: PyTree[AxisSpec] = if_array(0),
     axis_name: Hashable = None,
-    axis_size: Optional[int] = None,
+    axis_size: int | None = None,
     donate: Literal["all", "warn", "none"] = "none",
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]: ...
 
@@ -584,7 +532,7 @@ def filter_pmap(
     in_axes: PyTree[AxisSpec] = if_array(0),
     out_axes: PyTree[AxisSpec] = if_array(0),
     axis_name: Hashable = None,
-    axis_size: Optional[int] = None,
+    axis_size: int | None = None,
     donate: Literal["all", "warn", "none"] = "none",
 ) -> Callable[..., Any]: ...
 
@@ -596,7 +544,7 @@ def filter_pmap(
     in_axes: PyTree[AxisSpec] = if_array(0),
     out_axes: PyTree[AxisSpec] = if_array(0),
     axis_name: Hashable = None,
-    axis_size: Optional[int] = None,
+    axis_size: int | None = None,
     donate: Literal["all", "warn", "none"] = "none",
     **pmapkwargs,
 ):
@@ -606,7 +554,7 @@ def filter_pmap(
         JAX has now added more powerful parallelism APIs directly to the JIT interface.
         As such, using [`equinox.filter_jit`][] with sharded inputs is now recommended
         over `filter_pmap`. See also the
-        [parallelism example](../../examples/parallelism/).
+        [parallelism example](../examples/parallelism.ipynb).
 
     Parallelises a function. By default, all JAX/NumPy arrays are parallelised down
     their leading axis (i.e. axis index 0), and all other types are broadcast.
@@ -622,25 +570,25 @@ def filter_pmap(
     over), and callables `Leaf -> Union[None, int]` are mapped and evaluated on every
     leaf of their subtree. `None` should be used for non-JAX-array arguments.
 
-    - `fun` is a pure function to parallelise. Should be of the form `fun(*args)`; that
+    - `fun`: is a pure function to parallelise. Should be of the form `fun(*args)`; that
         is to say it cannot accept keyword arguments.
-    - `in_axes` indicates which axes of the input arrays should be parallelised over.
+    - `in_axes`: indicates which axes of the input arrays should be parallelised over.
         It should be a PyTree of `None`, `int`, or callables `Leaf -> Union[None, int]`.
         Its tree structure should either be:
         1. a prefix of the input tuple of `args`.
         2. a dictionary, in which case the named arguments use the specified indices
             to parallelise over, and all other arguments will have the default
             `eqx.if_array(0)`.
-    - `out_axes` indicates which axis of the output arrays the mapped axis should appear
-        at. It should be a PyTree of `None`, `int`, or callables
+    - `out_axes`: indicates which axis of the output arrays the mapped axis
+        should appear at. It should be a PyTree of `None`, `int`, or callables
         `Leaf -> Union[None, int]`, and its tree structure should be a prefix of the
         output `fun(*args)`.
-    - `axis_name` is an optional hashable Python object used to identify the mapped
+    - `axis_name`: is an optional hashable Python object used to identify the mapped
         axis so that parallel collectives (e.g. `jax.lax.psum`) can be applied.
-    - `axis_size` is an optional `int` describing the size of the axis mapped. This
+    - `axis_size`: is an optional `int` describing the size of the axis mapped. This
         only needs to be passed if none of the input arguments are vectorised, as else
         it can be deduced by looking at the argument shapes.
-    - `donate` indicates whether the buffers of JAX arrays are donated or not, it
+    - `donate`: indicates whether the buffers of JAX arrays are donated or not, it
         should either be:
         - `'all'`: donate all arrays and suppress all warnings about
             unused buffers;

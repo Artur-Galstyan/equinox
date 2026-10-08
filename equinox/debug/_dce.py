@@ -4,20 +4,21 @@ import jax
 import jax.core
 import jax.numpy as jnp
 import jax.tree_util as jtu
+import wadler_lindig as wl
 from jaxtyping import PyTree
 
 from .._doc_utils import WithRepr
 from .._filters import combine, is_array, partition
-from .._pretty_print import pformat_short_array_text, tree_pprint
+from .._pretty_print import tree_pprint
 
 
 _dce_store = {}
 
 
-def _register_alive(name: Hashable, tag: object):
-    def _register_alive_impl(i, x):
+def _register_alive(name: Hashable, tag: object, i: int):
+    def _register_alive_impl(x):
         leaves, _, _ = _dce_store[name][tag]
-        leaves[i.item()] = (x.shape, x.dtype.name)
+        leaves[i] = (x.shape, x.dtype.name)
         return x
 
     return _register_alive_impl
@@ -70,7 +71,9 @@ def store_dce(x: PyTree, name: Hashable = None):
         tag_store = _dce_store[name] = {}
     tag_store[tag] = ({}, treedef, static)
     leaves = [
-        jax.pure_callback(_register_alive(name, tag), x, i, x, vectorized=True)
+        jax.pure_callback(
+            _register_alive(name, tag, i), x, x, vmap_method="expand_dims"
+        )
         for i, x in enumerate(leaves)
     ]
     dynamic_out = jtu.tree_unflatten(treedef, leaves)
@@ -78,13 +81,13 @@ def store_dce(x: PyTree, name: Hashable = None):
 
 
 def inspect_dce(name: Hashable = None):
-    """Used in conjunction with `equinox.debug.check_dce`; see documentation there.
+    """Used in conjunction with `equinox.debug.store_dce`; see documentation there.
 
     Must be called outside of any JIT'd function.
 
     **Arguments:**
 
-    - `name`: Optional argument. Whatever name was used with `check_dce`.
+    - `name`: Optional argument. Whatever name was used with `store_dce`.
 
     **Returns:**
 
@@ -103,7 +106,7 @@ def inspect_dce(name: Hashable = None):
             except KeyError:
                 value = "<DCE'd>"
             else:
-                value = pformat_short_array_text(shape, dtype)
+                value = wl.array_summary(shape, dtype, kind=None).text
             new_leaves.append(WithRepr(None, value))
         tree = combine(jtu.tree_unflatten(treedef, new_leaves), static)
         print(f"Entry {i}:")

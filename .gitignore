@@ -16,3 +16,5 @@ examples/multipart_serialised.eqx
 .ruff_cache
 .pytest_cache
 .venv
+uv.lock
+.vscode

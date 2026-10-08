@@ -1,8 +1,8 @@
 import itertools as it
-from typing import Any, TYPE_CHECKING, Union
+from typing import Any, TYPE_CHECKING
 
 import jax
-import jax.core
+import jax.extend.core
 import jax.interpreters.ad as ad
 import jax.interpreters.batching as batching
 import jax.interpreters.mlir as mlir
@@ -81,22 +81,31 @@ def _select_if_vmap_batch(axis_size, axis_name, trace, inputs, batch_axes):
     del axis_name, trace
     pred, x, y = inputs
     bp, bx, by = batch_axes
-    if bp is batching.not_mapped:
-        if bx is batching.not_mapped:
-            x = jnp.broadcast_to(x, (axis_size,) + x.shape)
+    if bp is None:
+        if bx is None:
+            if by is None:
+                out_axis = None
+            else:
+                x = jnp.broadcast_to(x, (axis_size,) + x.shape)
+                y = jnp.moveaxis(y, by, 0)
+                out_axis = 0
         else:
-            x = jnp.moveaxis(x, bx, 0)
-        if by is batching.not_mapped:
-            y = jnp.broadcast_to(y, (axis_size,) + y.shape)
-        else:
-            y = jnp.moveaxis(y, by, 0)
+            if by is None:
+                x = jnp.moveaxis(x, bx, 0)
+                y = jnp.broadcast_to(y, (axis_size,) + y.shape)
+                out_axis = 0
+            else:
+                x = jnp.moveaxis(x, bx, 0)
+                y = jnp.moveaxis(y, by, 0)
+                out_axis = 0
         out = _select_if_vmap(pred, x, y, makes_false_steps=False)
     else:
         out = jax.vmap(lax.select, in_axes=(bp, bx, by))(pred, x, y)
-    return out, 0
+        out_axis = 0
+    return out, out_axis
 
 
-select_if_vmap_p = jax.core.Primitive("select_if_vmap")
+select_if_vmap_p = jax.extend.core.Primitive("select_if_vmap")
 select_if_vmap_p.def_impl(_select_if_vmap_impl)
 select_if_vmap_p.def_abstract_eval(_select_if_vmap_abstract)
 ad.primitive_jvps[select_if_vmap_p] = _select_if_vmap_jvp
@@ -131,14 +140,17 @@ def _select_if_vmap(pred, x, y, makes_false_steps):
 def _maybe_set_impl(
     pred, xs, x, *i_dynamic_leaves, i_static, i_treedef, kwargs, makes_false_steps
 ):
+    i_static = _to_raw_slice(i_static)
     i = combine(i_static, jtu.tree_unflatten(i_treedef, i_dynamic_leaves))
-    x = _select_if_vmap(pred, x, xs.at[i].get(**kwargs), makes_false_steps)
-    return [xs.at[i].set(x, **kwargs)]
+    kwargs_dict = dict(kwargs)
+    x = _select_if_vmap(pred, x, xs.at[i].get(**kwargs_dict), makes_false_steps)
+    return [xs.at[i].set(x, **kwargs_dict)]
 
 
 def _maybe_set_abstract(
     pred, xs, x, *i_dynamic_leaves, i_static, i_treedef, kwargs, makes_false_steps
 ):
+    del pred, i_dynamic_leaves, i_static, i_treedef, kwargs, makes_false_steps
     return [xs]
 
 
@@ -147,8 +159,11 @@ def _maybe_set_jvp(
 ):
     pred, xs, x, *i_dynamic_leaves = primals
     _, t_xs, t_x, *_ = tangents
+    i_static = _to_raw_slice(i_static)
     i = combine(i_static, jtu.tree_unflatten(i_treedef, i_dynamic_leaves))
-    out = _maybe_set(pred, xs, x, i, kwargs=kwargs, makes_false_steps=makes_false_steps)
+    out = _maybe_set(
+        pred, xs, x, i, kwargs=dict(kwargs), makes_false_steps=makes_false_steps
+    )
     if type(t_x) is ad.Zero and type(t_xs) is ad.Zero:
         t_out = t_xs
     else:
@@ -157,7 +172,7 @@ def _maybe_set_jvp(
         if type(t_xs) is ad.Zero:
             t_xs = jnp.zeros(t_xs.aval.shape, t_xs.aval.dtype)  # pyright: ignore
         t_out = _maybe_set(
-            pred, t_xs, t_x, i, kwargs=kwargs, makes_false_steps=makes_false_steps
+            pred, t_xs, t_x, i, kwargs=dict(kwargs), makes_false_steps=makes_false_steps
         )
     return [out], [t_out]
 
@@ -176,6 +191,7 @@ def _maybe_set_transpose(
     assert not ad.is_undefined_primal(pred)
     for z in i_dynamic_leaves:
         assert not ad.is_undefined_primal(z)
+    i_static = _to_raw_slice(i_static)
     i = combine(i_static, jtu.tree_unflatten(i_treedef, i_dynamic_leaves))
     [ct_out] = ct_out
     if ad.is_undefined_primal(xs):
@@ -193,7 +209,7 @@ def _maybe_set_transpose(
         if type(ct_out) is ad.Zero:
             ct_x = None
         else:
-            ct_x = ct_out.at[i].get(**kwargs)
+            ct_x = ct_out.at[i].get(**dict(kwargs))
             ct_x = _select_if_vmap(pred, ct_x, jnp.zeros_like(ct_x), makes_false_steps)
     else:
         ct_x = None
@@ -207,6 +223,38 @@ maybe_set_p = create_vprim(
     _maybe_set_jvp,
     _maybe_set_transpose,
 )
+
+
+class _HashableSlice(Module):
+    start: Any
+    stop: Any
+    step: Any
+
+
+def _is_hashable_slice(x):
+    return isinstance(x, _HashableSlice)
+
+
+def _to_hashable_slice_impl(x):
+    if isinstance(x, slice):
+        return _HashableSlice(x.start, x.stop, x.step)
+    else:
+        return x
+
+
+def _to_raw_slice_impl(x):
+    if _is_hashable_slice(x):
+        return slice(x.start, x.stop, x.step)
+    else:
+        return x
+
+
+def _to_hashable_slice(tree):
+    return jtu.tree_map(_to_hashable_slice_impl, tree)
+
+
+def _to_raw_slice(tree):
+    return jtu.tree_map(_to_raw_slice_impl, tree, is_leaf=_is_hashable_slice)
 
 
 # This is a carefully optimised routine, that relies on the special behaviour exhibited
@@ -235,6 +283,7 @@ def _maybe_set(pred, xs, x, i, *, kwargs, makes_false_steps):
     x = fixed_asarray(x).astype(dtype)
     x = jnp.broadcast_to(x, jax.eval_shape(lambda: xs[i]).shape)
     i_dynamic, i_static = partition(i, is_array)
+    i_static = _to_hashable_slice(i_static)
     i_dynamic_leaves, i_treedef = jtu.tree_flatten(i_dynamic)
     [out] = maybe_set_p.bind(
         pred,
@@ -243,15 +292,14 @@ def _maybe_set(pred, xs, x, i, *, kwargs, makes_false_steps):
         *i_dynamic_leaves,
         i_static=i_static,
         i_treedef=i_treedef,
-        kwargs=kwargs,
+        kwargs=tuple(kwargs.items()),
         makes_false_steps=makes_false_steps,
     )
     return out
 
 
 if TYPE_CHECKING:
-    from typing import Annotated, TypeVar
-    from typing_extensions import TypeAlias
+    from typing import Annotated, TypeAlias, TypeVar
 
     _T = TypeVar("_T")
     MaybeBuffer: TypeAlias = Annotated[_T, "MaybeBuffer"]
@@ -337,7 +385,7 @@ class _BufferItem(Module):
         )
 
 
-def buffer_at_set(buffer: Union[Array, _Buffer], item, x, *, pred=True, **kwargs):
+def buffer_at_set(buffer: Array | _Buffer, item, x, *, pred=True, **kwargs):
     """As `buffer.at[...].set(...)`, and supports the `pred` argument even if it is an
     array.
 

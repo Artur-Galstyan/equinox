@@ -1,5 +1,4 @@
 import functools as ft
-import typing
 
 import equinox as eqx
 import jax
@@ -7,36 +6,11 @@ import jax.numpy as jnp
 import numpy as np
 
 
-def test_tuple():
-    assert eqx.tree_pformat((1, 2)) == "(1, 2)"
-    assert eqx.tree_pformat((1,)) == "(1,)"
-    assert eqx.tree_pformat(()) == "()"
-
-
-def test_list():
-    assert eqx.tree_pformat([1, 2]) == ("[1, 2]")
-    assert eqx.tree_pformat([1]) == "[1]"
-    assert eqx.tree_pformat([]) == "[]"
-
-
-def test_dict():
-    assert eqx.tree_pformat({"a": 1, "b": 2}) == "{'a': 1, 'b': 2}"
-    assert eqx.tree_pformat({"a": 1}) == "{'a': 1}"
-    assert eqx.tree_pformat(dict()) == "{}"
-
-
 def test_module(getkey):
     lin = eqx.nn.Linear(2, 2, key=getkey())
     mlp = eqx.nn.MLP(2, 2, 2, 2, key=getkey())
     eqx.tree_pformat(lin)
     eqx.tree_pformat(mlp)
-
-
-def test_named_tuple():
-    class M(typing.NamedTuple):
-        a: int
-
-    assert eqx.tree_pformat(M(1)) == "M(a=1)"
 
 
 def test_jax_array():
@@ -53,14 +27,6 @@ def test_numpy_array():
     assert eqx.tree_pformat(np.array(1), short_arrays=False) == "array(1)"
 
 
-def test_builtins():
-    assert eqx.tree_pformat(1) == "1"
-    assert eqx.tree_pformat(0.1) == "0.1"
-    assert eqx.tree_pformat(True) == "True"
-    assert eqx.tree_pformat(1 + 1j) == "(1+1j)"
-    assert eqx.tree_pformat("hi") == "'hi'"
-
-
 def test_function():
     def f():
         pass
@@ -74,8 +40,22 @@ def test_function():
     i = jax.custom_vjp(f)
     j = jax.custom_jvp(f)
 
-    assert eqx.tree_pformat(f) == "<function f>"
-    assert eqx.tree_pformat(g) == "<wrapped function f>"
-    assert eqx.tree_pformat(h) == "<wrapped function f>"
-    assert eqx.tree_pformat(i) == "<function f>"
-    assert eqx.tree_pformat(j) == "<function f>"
+    assert eqx.tree_pformat(f) == "<function test_function.<locals>.f>"
+    assert eqx.tree_pformat(g) == "<wrapped function test_function.<locals>.f>"
+    assert eqx.tree_pformat(h) == "partial(<function test_function.<locals>.f>)"
+    assert eqx.tree_pformat(i) == "<function test_function.<locals>.f>"
+    assert eqx.tree_pformat(j) == "<function test_function.<locals>.f>"
+
+
+def test_struct_as_array():
+    x = jax.ShapeDtypeStruct((2, 3), jax.numpy.float32)
+    assert eqx.tree_pformat(x, struct_as_array=True) == "f32[2,3]"
+
+
+def test_truncate_leaf():
+    class Foo:
+        pass
+
+    foo = Foo()
+    truncate_leaf = lambda x: x is foo
+    assert eqx.tree_pformat([foo, 1], truncate_leaf=truncate_leaf) == "[Foo(...), 1]"

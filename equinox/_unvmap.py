@@ -2,6 +2,7 @@ from typing import cast
 
 import jax
 import jax.core
+import jax.extend.core
 import jax.interpreters.batching as batching
 import jax.interpreters.mlir as mlir
 import jax.numpy as jnp
@@ -10,7 +11,7 @@ from jaxtyping import Array, ArrayLike, Bool, Int
 
 # unvmap_all
 
-unvmap_all_p = jax.core.Primitive("unvmap_all")
+unvmap_all_p = jax.extend.core.Primitive("unvmap_all")
 
 
 def unvmap_all(x: Bool[ArrayLike, "..."]) -> Bool[Array, ""]:
@@ -28,7 +29,7 @@ def _unvmap_all_abstract_eval(x):
 
 def _unvmap_all_batch(x, batch_axes):
     (x,) = x
-    return unvmap_all(x), batching.not_mapped
+    return unvmap_all(x), None
 
 
 unvmap_all_p.def_impl(_unvmap_all_impl)
@@ -41,7 +42,7 @@ mlir.register_lowering(
 
 # unvmap_any
 
-unvmap_any_p = jax.core.Primitive("unvmap_any")
+unvmap_any_p = jax.extend.core.Primitive("unvmap_any")
 
 
 def unvmap_any(x: Bool[ArrayLike, "..."]) -> Bool[Array, ""]:
@@ -59,7 +60,7 @@ def _unvmap_any_abstract_eval(x):
 
 def _unvmap_any_batch(x, batch_axes):
     (x,) = x
-    return unvmap_any(x), batching.not_mapped
+    return unvmap_any(x), None
 
 
 unvmap_any_p.def_impl(_unvmap_any_impl)
@@ -72,7 +73,7 @@ mlir.register_lowering(
 
 # unvmap_max
 
-unvmap_max_p = jax.core.Primitive("unvmap_max")
+unvmap_max_p = jax.extend.core.Primitive("unvmap_max")
 
 
 def unvmap_max(x: Int[ArrayLike, "..."]) -> Int[Array, ""]:
@@ -90,7 +91,7 @@ def _unvmap_max_abstract_eval(x):
 
 def _unvmap_max_batch(x, batch_axes):
     (x,) = x
-    return unvmap_max(x), batching.not_mapped
+    return unvmap_max(x), None
 
 
 unvmap_max_p.def_impl(_unvmap_max_impl)

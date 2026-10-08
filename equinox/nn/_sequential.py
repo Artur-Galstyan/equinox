@@ -1,17 +1,16 @@
 from collections.abc import Callable, Sequence
-from typing import Any, Optional, overload, Union
+from typing import Any, overload
 
-import jax
 import jax.random as jr
 from jaxtyping import Array, PRNGKeyArray
 
-from .._better_abstract import AbstractClassVar
 from .._custom_types import sentinel
-from .._module import Module, StrictConfig
+from .._module import AbstractClassVar, Module
+from ._misc import named_scope
 from ._stateful import State
 
 
-class StatefulLayer(Module, strict=StrictConfig(allow_abstract_name=True)):
+class StatefulLayer(Module):
     """An abstract base class, used by [`equinox.nn.Sequential`][], to mark that a
     layer might be stateful. If `Sequential` sees that a layer inherits from
     `StatefulLayer`, then it will call `layer.is_stateful()` to check whether to
@@ -40,7 +39,7 @@ class StatefulLayer(Module, strict=StrictConfig(allow_abstract_name=True)):
     __call__: AbstractClassVar[Callable]
 
 
-class Sequential(StatefulLayer, strict=StrictConfig(allow_method_override=True)):
+class Sequential(StatefulLayer):
     """A sequence of [`equinox.Module`][]s applied in order.
 
     !!! note
@@ -64,30 +63,31 @@ class Sequential(StatefulLayer, strict=StrictConfig(allow_method_override=True))
         )
 
     @overload
-    def __call__(self, x: Array, *, key: Optional[PRNGKeyArray] = None) -> Array: ...
+    def __call__(self, x: Array, *, key: PRNGKeyArray | None = None) -> Array: ...
 
     @overload
     def __call__(
-        self, x: Array, state: State, *, key: Optional[PRNGKeyArray] = None
+        self, x: Array, state: State, *, key: PRNGKeyArray | None = None
     ) -> tuple[Array, State]: ...
 
-    @jax.named_scope("eqx.nn.Sequential")
+    @named_scope("eqx.nn.Sequential")
     def __call__(
         self,
         x: Array,
         state: State = sentinel,
         *,
-        key: Optional[PRNGKeyArray] = None,
-    ) -> Union[Array, tuple[Array, State]]:
+        key: PRNGKeyArray | None = None,
+    ) -> Array | tuple[Array, State]:
         """**Arguments:**
 
         - `x`: passed to the first member of the sequence.
         - `state`: If provided, then it is passed to, and updated from, any layer
             which subclasses [`equinox.nn.StatefulLayer`][].
-        - `key`: Ignored; provided for compatibility with the rest of the Equinox API.
-            (Keyword only argument.)
+        - `key`: If provided, then it is split by the number of layers, and a subkey
+            passed to each layer.
 
         **Returns:**
+
         The output of the last member of the sequence.
 
         If `state` is passed, then a 2-tuple of `(output, state)` is returned.
@@ -108,7 +108,7 @@ class Sequential(StatefulLayer, strict=StrictConfig(allow_method_override=True))
         else:
             return x, state
 
-    def __getitem__(self, i: Union[int, slice]) -> Callable:
+    def __getitem__(self, i: int | slice) -> Callable:
         if isinstance(i, int):
             return self.layers[i]
         elif isinstance(i, slice):
@@ -123,12 +123,15 @@ class Sequential(StatefulLayer, strict=StrictConfig(allow_method_override=True))
         return len(self.layers)
 
 
-class Lambda(Module, strict=True):
+class Lambda(Module):
     """Wraps a callable (e.g. an activation function) for use with
     [`equinox.nn.Sequential`][].
 
     Precisely, this just adds an extra `key` argument (that is ignored). Given some
     function `fn`, then `Lambda` is essentially a convenience for `lambda x, key: f(x)`.
+
+    `fn` is treated as a node in the PyTree and thus supports callable nodes (such as
+     other modules, or custom PyTrees implementing `__call__`).
 
     !!! faq
 
@@ -150,7 +153,7 @@ class Lambda(Module, strict=True):
 
     fn: Callable[[Any], Any]
 
-    def __call__(self, x: Array, *, key: Optional[PRNGKeyArray] = None) -> Array:
+    def __call__(self, x: Array, *, key: PRNGKeyArray | None = None) -> Array:
         """**Arguments:**
 
         - `x`: The input JAX array.

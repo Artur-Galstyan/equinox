@@ -1,14 +1,15 @@
 from collections.abc import Callable
-from typing import Any, Optional, overload, TypeVar, Union
+from typing import Any, Final, overload, TypeVar
 
 import jax
+import jax.core
 import jax.numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
 from jaxtyping import PyTree
 
 
-AxisSpec = Union[bool, Callable[[Any], bool]]
+AxisSpec = bool | Callable[[Any], bool]
 
 
 #
@@ -16,28 +17,53 @@ AxisSpec = Union[bool, Callable[[Any], bool]]
 #
 
 
+# Workaround https://github.com/patrick-kidger/equinox/issues/1095 in a backward
+# compatible manner.
+_NDARRAY_TYPES: Final = (np.ndarray, np.generic)
+_ARRAY_TYPES = (*_NDARRAY_TYPES, jax.Array)  # JAX < 0.7.2
+
+try:  # JAX 0.7.2
+    from jax._src.literals import (  # pyright: ignore[reportMissingImports]
+        LiteralArray,  # pyright: ignore[reportAttributeAccessIssue]
+    )
+
+    _ARRAY_TYPES += (LiteralArray,)
+except ImportError:
+    pass
+
+try:  # JAX > 0.7.2
+    from jax._src.literals import (  # pyright: ignore[reportMissingImports]
+        TypedNdArray,  # pyright: ignore[reportAttributeAccessIssue]
+    )
+
+    _ARRAY_TYPES += (TypedNdArray,)
+except ImportError:
+    pass
+
+
 def is_array(element: Any) -> bool:
     """Returns `True` if `element` is a JAX array or NumPy array."""
-    return isinstance(element, (np.ndarray, np.generic, jax.Array))
+    return isinstance(element, _ARRAY_TYPES)
 
 
 # Chosen to match
 # https://github.com/google/jax/blob/4a17c78605e7fc69a69a999e2f6298db79d3837a/jax/_src/numpy/lax_numpy.py#L542  # noqa: E501
+_ARRAY_LIKE_TYPES: Final = (*_ARRAY_TYPES, float, complex, bool, int)
+
+
 def is_array_like(element: Any) -> bool:
     """Returns `True` if `element` is a JAX array, a NumPy array, or a Python
     `float`/`complex`/`bool`/`int`.
     """
-    return isinstance(
-        element, (jax.Array, np.ndarray, np.generic, float, complex, bool, int)
-    ) or hasattr(element, "__jax_array__")
+    return isinstance(element, _ARRAY_LIKE_TYPES) or hasattr(element, "__jax_array__")
 
 
 def is_inexact_array(element: Any) -> bool:
     """Returns `True` if `element` is an inexact (i.e. floating or complex) JAX/NumPy
     array.
     """
-    if isinstance(element, (np.ndarray, np.generic)):
-        return np.issubdtype(element.dtype, np.inexact)
+    if isinstance(element, _NDARRAY_TYPES):
+        return bool(np.issubdtype(element.dtype, np.inexact))
     elif isinstance(element, jax.Array):
         return jnp.issubdtype(element.dtype, jnp.inexact)
     else:
@@ -50,8 +76,8 @@ def is_inexact_array_like(element: Any) -> bool:
     """
     if hasattr(element, "__jax_array__"):
         element = element.__jax_array__()
-    if isinstance(element, (np.ndarray, np.generic)):
-        return np.issubdtype(element.dtype, np.inexact)
+    if isinstance(element, _NDARRAY_TYPES):
+        return bool(np.issubdtype(element.dtype, np.inexact))
     elif isinstance(element, jax.Array):
         return jnp.issubdtype(element.dtype, jnp.inexact)
     else:
@@ -65,6 +91,8 @@ def is_inexact_array_like(element: Any) -> bool:
 
 def _make_filter_tree(is_leaf):
     def _filter_tree(mask: AxisSpec, arg: Any) -> PyTree[bool]:
+        if isinstance(mask, jax.core.Tracer):
+            raise ValueError("`filter_spec` leaf values cannot be traced arrays.")
         if isinstance(mask, bool):
             return jtu.tree_map(lambda _: mask, arg, is_leaf=is_leaf)
         elif callable(mask):
@@ -82,7 +110,7 @@ def filter(
     filter_spec: PyTree[AxisSpec],
     inverse: bool = False,
     replace: Any = None,
-    is_leaf: Optional[Callable[[Any], bool]] = None,
+    is_leaf: Callable[[Any], bool] | None = None,
 ) -> PyTree:
     """
     Filters out the leaves of a PyTree not satisfying a condition. Those not satisfying
@@ -106,16 +134,16 @@ def filter(
 
     **Arguments:**
 
-    - `pytree` is any PyTree.
-    - `filter_spec` is a PyTree whose structure should be a prefix of the structure of
+    - `pytree`: is any PyTree.
+    - `filter_spec`: is a PyTree whose structure should be a prefix of the structure of
         `pytree`. Each of its leaves should either be:
         - `True`, in which case the leaf or subtree is kept;
         - `False`, in which case the leaf or subtree is replaced with `replace`;
         - a callable `Leaf -> bool`, in which case this is evaluated on the leaf or
             mapped over the subtree, and the leaf kept or replaced as appropriate.
-    - `inverse` switches the truthy/falsey behaviour: falsey results are kept and
+    - `inverse`: switches the truthy/falsey behaviour: falsey results are kept and
         truthy results are replaced.
-    - `replace` is what to replace any falsey leaves with. Defaults to `None`.
+    - `replace`: is what to replace any falsey leaves with. Defaults to `None`.
     - `is_leaf`: Optional function called at each node of the PyTree. It should return
         a boolean. `True` indicates that the whole subtree should be treated as leaf;
         `False` indicates that the subtree should be traversed as a PyTree.
@@ -136,7 +164,7 @@ def partition(
     pytree: PyTree,
     filter_spec: PyTree[AxisSpec],
     replace: Any = None,
-    is_leaf: Optional[Callable[[Any], bool]] = None,
+    is_leaf: Callable[[Any], bool] | None = None,
 ) -> tuple[PyTree, PyTree]:
     """Splits a PyTree into two pieces. Equivalent to
     `filter(...), filter(..., inverse=True)`, but slightly more efficient.
@@ -167,14 +195,12 @@ _T = TypeVar("_T", bound=PyTree)
 
 
 @overload
-def combine(*pytrees: _T, is_leaf: Optional[Callable[[Any], bool]] = None) -> _T: ...
+def combine(*pytrees: _T, is_leaf: Callable[[Any], bool] | None = None) -> _T: ...
 @overload
 def combine(
-    *pytrees: PyTree, is_leaf: Optional[Callable[[Any], bool]] = None
+    *pytrees: PyTree, is_leaf: Callable[[Any], bool] | None = None
 ) -> PyTree: ...
-def combine(
-    *pytrees: PyTree, is_leaf: Optional[Callable[[Any], bool]] = None
-) -> PyTree:
+def combine(*pytrees: PyTree, is_leaf: Callable[[Any], bool] | None = None) -> PyTree:
     """Combines multiple PyTrees into one PyTree, by replacing `None` leaves.
 
     !!! example

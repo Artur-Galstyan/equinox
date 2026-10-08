@@ -1,7 +1,7 @@
 import functools as ft
 import warnings
 from collections.abc import Sequence
-from typing import Optional, overload, Union
+from typing import overload
 
 import jax
 import jax.numpy as jnp
@@ -10,10 +10,11 @@ from jaxtyping import Array, Float, PRNGKeyArray
 from .._custom_types import sentinel
 from .._misc import default_floating_dtype, left_broadcast_to
 from .._module import field, Module
+from ._misc import named_scope
 from ._stateful import State
 
 
-class LayerNorm(Module, strict=True):
+class LayerNorm(Module):
     r"""
     Computes a mean and standard deviation over the whole input array, and uses these
     to normalise the whole array. Optionally applies an elementwise affine
@@ -54,18 +55,18 @@ class LayerNorm(Module, strict=True):
     eps: float = field(static=True)
     use_weight: bool = field(static=True)
     use_bias: bool = field(static=True)
-    weight: Optional[Float[Array, "*shape"]]
-    bias: Optional[Float[Array, "*shape"]]
+    weight: Float[Array, "*shape"] | None
+    bias: Float[Array, "*shape"] | None
 
     def __init__(
         self,
-        shape: Union[int, Sequence[int]],
+        shape: int | Sequence[int],
         eps: float = 1e-5,
         use_weight: bool = True,
         use_bias: bool = True,
         dtype=None,
         *,
-        elementwise_affine: Optional[bool] = None,
+        elementwise_affine: bool | None = None,
     ):
         """**Arguments:**
 
@@ -98,25 +99,25 @@ class LayerNorm(Module, strict=True):
         self.bias = jnp.zeros(shape, dtype=dtype) if use_bias else None
 
     @overload
-    def __call__(self, x: Array, *, key: Optional[PRNGKeyArray] = None) -> Array: ...
+    def __call__(self, x: Array, *, key: PRNGKeyArray | None = None) -> Array: ...
 
     @overload
     def __call__(
-        self, x: Array, state: State, *, key: Optional[PRNGKeyArray] = None
+        self, x: Array, state: State, *, key: PRNGKeyArray | None = None
     ) -> tuple[Array, State]: ...
 
-    @jax.named_scope("eqx.nn.LayerNorm")
+    @named_scope("eqx.nn.LayerNorm")
     def __call__(
         self,
         x: Float[Array, "*shape"],
         state: State = sentinel,
         *,
-        key: Optional[PRNGKeyArray] = None,
-    ) -> Union[Array, tuple[Array, State]]:
+        key: PRNGKeyArray | None = None,
+    ) -> Array | tuple[Array, State]:
         """**Arguments:**
 
         - `x`: A JAX array, with the same shape as the `shape` passed to `__init__`.
-        - `state`: Ignored; provided for interchangability with the
+        - `state`: Ignored; provided for interchangeability with the
             [`equinox.nn.BatchNorm`][] API.
         - `key`: Ignored; provided for compatibility with the rest of the Equinox API.
             (Keyword only argument.)
@@ -140,22 +141,27 @@ class LayerNorm(Module, strict=True):
                 "`x.shape` ended with `shape`. However, this turned out to be a "
                 "frequent source of bugs, so we made the check stricter!"
             )
+        orig_dtype = x.dtype
+        with jax.numpy_dtype_promotion("standard"):
+            dtype = jnp.result_type(x.dtype, jnp.float32)
+
+        x = x.astype(dtype)
         mean = jnp.mean(x, keepdims=True)
         variance = jnp.var(x, keepdims=True)
         variance = jnp.maximum(0.0, variance)
         inv = jax.lax.rsqrt(variance + self.eps)
         out = (x - mean) * inv
         if self.use_weight:
-            out = self.weight * out
+            out = self.weight.astype(dtype) * out  # pyright: ignore
         if self.use_bias:
-            out = out + self.bias
+            out = out + self.bias.astype(dtype)  # pyright: ignore
         if state is sentinel:
-            return out
+            return out.astype(orig_dtype)
         else:
-            return out, state
+            return out.astype(orig_dtype), state
 
 
-class GroupNorm(Module, strict=True):
+class GroupNorm(Module):
     r"""
     Splits the first dimension ("channels") into groups of fixed size. Computes a mean
     and standard deviation over the contents of each group, and uses these to normalise
@@ -185,16 +191,16 @@ class GroupNorm(Module, strict=True):
     """  # noqa: E501
 
     groups: int = field(static=True)
-    channels: Optional[int] = field(static=True)
+    channels: int | None = field(static=True)
     eps: float = field(static=True)
     channelwise_affine: bool = field(static=True)
-    weight: Optional[Array]
-    bias: Optional[Array]
+    weight: Array | None
+    bias: Array | None
 
     def __init__(
         self,
         groups: int,
-        channels: Optional[int] = None,
+        channels: int | None = None,
         eps: float = 1e-5,
         channelwise_affine: bool = True,
         dtype=None,
@@ -226,17 +232,17 @@ class GroupNorm(Module, strict=True):
         self.bias = jnp.zeros(channels, dtype=dtype) if channelwise_affine else None
 
     @overload
-    def __call__(self, x: Array, *, key: Optional[PRNGKeyArray] = None) -> Array: ...
+    def __call__(self, x: Array, *, key: PRNGKeyArray | None = None) -> Array: ...
 
     @overload
     def __call__(
-        self, x: Array, state: State, *, key: Optional[PRNGKeyArray] = None
+        self, x: Array, state: State, *, key: PRNGKeyArray | None = None
     ) -> tuple[Array, State]: ...
 
-    @jax.named_scope("eqx.nn.GroupNorm")
+    @named_scope("eqx.nn.GroupNorm")
     def __call__(
-        self, x: Array, state: State = sentinel, *, key: Optional[PRNGKeyArray] = None
-    ) -> Union[Array, tuple[Array, State]]:
+        self, x: Array, state: State = sentinel, *, key: PRNGKeyArray | None = None
+    ) -> Array | tuple[Array, State]:
         """**Arguments:**
 
         - `x`: A JAX array of shape `(channels, ...)`.
@@ -253,6 +259,12 @@ class GroupNorm(Module, strict=True):
         is passed through unchanged. If `state` is not passed, then just the output is
         returned.
         """
+
+        orig_dtype = x.dtype
+        with jax.numpy_dtype_promotion("standard"):
+            dtype = jnp.result_type(x.dtype, jnp.float32)
+
+        x = x.astype(dtype)
         channels = x.shape[0]
         y = x.reshape(self.groups, channels // self.groups, *x.shape[1:])
         mean = jax.vmap(ft.partial(jnp.mean, keepdims=True))(y)
@@ -264,14 +276,14 @@ class GroupNorm(Module, strict=True):
         if self.channelwise_affine:
             weight = left_broadcast_to(self.weight, out.shape)  # pyright: ignore
             bias = left_broadcast_to(self.bias, out.shape)  # pyright: ignore
-            out = weight * out + bias
+            out = weight.astype(dtype) * out + bias.astype(dtype)
         if state is sentinel:
-            return out
+            return out.astype(orig_dtype)
         else:
-            return out, state
+            return out.astype(orig_dtype), state
 
 
-class RMSNorm(Module, strict=True):
+class RMSNorm(Module):
     r"""
     A simplified version of LayerNorm which rescales the inputs, but does not center
     them. Optionally applies a learned reweighting of the transformed array afterward.
@@ -283,12 +295,11 @@ class RMSNorm(Module, strict=True):
     where $\Vert x \Vert^2_2 = \sum_{i=1}^n x_i^2$, $n = \dim(x)$, and $\gamma$ is a
     learned array with the same shape as $x$ if `use_weight=True`, or
     $\gamma = 1$ if `use_weight=False`, as proposed in
-    [this paper](https://browse.arxiv.org/abs/2307.14995). `\beta` is an optional bias
-    term.
+    [this paper](https://arxiv.org/abs/2307.14995). `\beta` is an optional bias term.
 
     ??? cite
 
-        [Root Mean Square Layer Normalization](https://browse.arxiv.org/abs/1910.07467)
+        [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467)
 
         ```bibtex
         @article{zhang2019root,
@@ -304,12 +315,12 @@ class RMSNorm(Module, strict=True):
     eps: float = field(static=True)
     use_weight: bool = field(static=True)
     use_bias: bool = field(static=True)
-    weight: Optional[Float[Array, "*shape"]]
-    bias: Optional[Float[Array, "*shape"]]
+    weight: Float[Array, "*shape"] | None
+    bias: Float[Array, "*shape"] | None
 
     def __init__(
         self,
-        shape: Union[int, Sequence[int]],
+        shape: int | Sequence[int],
         eps: float = 1e-5,
         use_weight: bool = True,
         use_bias: bool = True,
@@ -339,21 +350,21 @@ class RMSNorm(Module, strict=True):
         self.bias = jnp.zeros(shape, dtype=dtype) if use_bias else None
 
     @overload
-    def __call__(self, x: Array, *, key: Optional[PRNGKeyArray] = None) -> Array: ...
+    def __call__(self, x: Array, *, key: PRNGKeyArray | None = None) -> Array: ...
 
     @overload
     def __call__(
-        self, x: Array, state: State, *, key: Optional[PRNGKeyArray] = None
+        self, x: Array, state: State, *, key: PRNGKeyArray | None = None
     ) -> tuple[Array, State]: ...
 
-    @jax.named_scope("eqx.nn.RMSNorm")
+    @named_scope("eqx.nn.RMSNorm")
     def __call__(
         self,
         x: Float[Array, "*shape"],
         state: State = sentinel,
         *,
-        key: Optional[PRNGKeyArray] = None,
-    ) -> Union[Array, tuple[Array, State]]:
+        key: PRNGKeyArray | None = None,
+    ) -> Array | tuple[Array, State]:
         """**Arguments:**
 
         - `x`: A JAX array, with the same shape as the `shape` passed to `__init__`.
@@ -377,17 +388,20 @@ class RMSNorm(Module, strict=True):
                 "to replace `rms_norm(x)` with `jax.vmap(rms_norm)(x)`.\n"
             )
 
+        orig_dtype = x.dtype
+
         with jax.numpy_dtype_promotion("standard"):
             dtype = jnp.result_type(x.dtype, jnp.float32)
 
-        inv_rms = jax.lax.rsqrt(jnp.mean(x.astype(dtype) ** 2) + self.eps)
-        out = (inv_rms * x.astype(dtype)).astype(x.dtype)
+        x = x.astype(dtype)
+        inv_rms = jax.lax.rsqrt(jnp.mean(x**2) + self.eps)
+        out = inv_rms * x
 
         if self.use_weight:
-            out = self.weight * out
+            out = self.weight.astype(dtype) * out  # pyright: ignore
         if self.use_bias:
-            out = out + self.bias
+            out = out + self.bias.astype(dtype)  # pyright: ignore
         if state is sentinel:
-            return out
+            return out.astype(orig_dtype)
         else:
-            return out, state
+            return out.astype(orig_dtype), state

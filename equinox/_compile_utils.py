@@ -20,9 +20,17 @@ def hashable_filter(pytree: PyTree, filter_fn: Callable):
 
 def hashable_partition(pytree: PyTree, filter_fn: Callable):
     leaves, treedef = jtu.tree_flatten(pytree)
-    dynamic_leaves = tuple(x if filter_fn(x) else None for x in leaves)
-    static_leaves = tuple(None if filter_fn(x) else x for x in leaves)
-    return dynamic_leaves, (static_leaves, treedef)
+    length = len(leaves)
+    a = [None] * length
+    b = [None] * length
+
+    for i, x in enumerate(leaves):
+        if filter_fn(x):
+            a[i] = x
+        else:
+            b[i] = x
+
+    return tuple(a), (tuple(b), treedef)
 
 
 def hashable_combine(dynamic_leaves, static) -> PyTree:
@@ -104,9 +112,9 @@ class Lowered(Module):
     def as_text(self):
         return self.lowered.as_text()
 
-    def compile(self):
+    def compile(self, /, compiler_options: dict[str, str | bool] | None = None):
         return Compiled(
-            self.lowered.compile(),
+            self.lowered.compile(compiler_options=compiler_options),
             self.info,
             self.preprocess,  # pyright: ignore
             self.postprocess,  # pyright: ignore

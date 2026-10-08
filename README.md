@@ -15,11 +15,13 @@ _Coming from [Flax](https://github.com/google/flax) or [Haiku](https://github.co
 
 ## Installation
 
+Requires Python 3.10+.
+
 ```bash
 pip install equinox
 ```
 
-Requires Python 3.9+ and JAX 0.4.13+.
+Equinox is also available through a community-supported build on [conda-forge](https://github.com/conda-forge/equinox-feedstock).
 
 ## Documentation
 
@@ -46,7 +48,7 @@ class Linear(eqx.Module):
         return self.weight @ x + self.bias
 ```
 
-and fully compatible with normal JAX operations:
+and are fully compatible with normal JAX operations:
 
 ```python
 @jax.jit
@@ -88,6 +90,7 @@ If you found this library to be useful in academic work, then please cite: ([arX
 [Optax](https://github.com/deepmind/optax): first-order gradient (SGD, Adam, ...) optimisers.  
 [Orbax](https://github.com/google/orbax): checkpointing (async/multi-host/multi-device).  
 [Levanter](https://github.com/stanford-crfm/levanter): scalable+reliable training of foundation models (e.g. LLMs).  
+[paramax](https://github.com/danielward27/paramax): parameterizations and constraints for PyTrees.
 
 **Scientific computing**  
 [Diffrax](https://github.com/patrick-kidger/diffrax): numerical differential equation solvers.  
@@ -98,4 +101,5 @@ If you found this library to be useful in academic work, then please cite: ([arX
 [PySR](https://github.com/milesCranmer/PySR): symbolic regression. (Non-JAX honourable mention!)  
 
 **Awesome JAX**  
-[Awesome JAX](https://github.com/n2cholas/awesome-jax): a longer list of other JAX projects.  
+[Awesome Equinox](https://docs.kidger.site/equinox/awesome-list/)  
+[Awesome JAX](https://github.com/lockwo/awesome-jax): a longer list of other JAX projects.  

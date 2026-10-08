@@ -3,6 +3,7 @@ from typing import Any
 
 import jax
 import jax.core
+import jax.extend.core
 import jax.interpreters.ad as ad
 import jax.interpreters.batching as batching
 import jax.interpreters.mlir as mlir
@@ -59,7 +60,17 @@ def _is_array_like_internal(x):
 
 def _zero_from_primal(p):
     assert type(p) is not ad.UndefinedPrimal
-    return ad.Zero(jax.core.get_aval(p).at_least_vspace())
+    if hasattr(jax, "typeof"):
+        aval = jax.typeof(p)
+    else:
+        aval = jax.core.get_aval(p)  # pyright: ignore[reportAttributeAccessIssue]
+    if hasattr(aval, "to_tangent_aval"):
+        # JAX >=0.4.34
+        aval = aval.to_tangent_aval()  # pyright: ignore
+    else:
+        # earlier JAX
+        aval = aval.at_least_vspace()
+    return ad.Zero(aval)
 
 
 def _combine(dynamic, static):
@@ -90,7 +101,7 @@ def _make_spec(x, y):
 
 
 class Flatten:
-    __slots__ = ("treedef_out", "static_out")
+    __slots__ = ("treedef_out", "static_out", "__weakref__")
 
     def called(self):
         return hasattr(self, "treedef_out")
@@ -234,21 +245,19 @@ def filter_primitive_batching(rule):
     def _wrapper(dynamic, batch_axes, *, treedef, static, flatten):
         flat = _combine(dynamic, static)
         inputs = jtu.tree_unflatten(treedef, flat)
-        batch_axes = [None if b is batching.not_mapped else b for b in batch_axes]
+        batch_axes = [None if b is None else b for b in batch_axes]
         batch_axes_static = [x if x is _missing_dynamic else None for x in static]
         batch_axes = _combine(batch_axes, batch_axes_static)
         batch_axes = jtu.tree_unflatten(treedef, batch_axes)
         out, batch_axes = rule(inputs, batch_axes)
         flat_out, flat_batch_axes = flatten(out, batch_axes)
-        flat_batch_axes = [
-            batching.not_mapped if b is None else b for b in flat_batch_axes
-        ]
+        flat_batch_axes = [None if b is None else b for b in flat_batch_axes]
         return flat_out, flat_batch_axes
 
     return _wrapper
 
 
-def filter_primitive_bind(prim: jax.core.Primitive, *args) -> PyTree:
+def filter_primitive_bind(prim: jax.extend.core.Primitive, *args) -> PyTree:
     """Calls a primitive that has had its rules defined using the filter
     functions above.
     """
@@ -294,21 +303,25 @@ _vprim_transpose_registry = {}
 
 
 def create_vprim(name: str, impl, abstract_eval, jvp, transpose):
-    prim = jax.core.Primitive(name)
+    prim = jax.extend.core.Primitive(name)
     prim.multiple_results = True
 
     def batch_rule(axis_size, axis_name, trace_type, inputs, batch_axes, **params):
         del trace_type
-        # delegates batching to `_vprim_p`
-        out = _vprim_p.bind(
-            *inputs,
-            prim=prim,
-            __axis_size=axis_size,
-            __axis_name=axis_name,
-            __batch_axes=batch_axes,
-            params=params,
-        )
-        batch_axes_out = jtu.tree_map(lambda _: 0, out)
+        if all(b is None for b in jtu.tree_leaves(batch_axes)):
+            out = prim.bind(*inputs, **params)
+            batch_axes_out = jtu.tree_map(lambda _: None, out)
+        else:
+            # delegates batching to `_vprim_p`
+            out = _vprim_p.bind(
+                *inputs,
+                prim=prim,
+                __axis_size=axis_size,
+                __axis_name=axis_name,
+                __batch_axes=batch_axes,
+                params=tuple(params.items()),
+            )
+            batch_axes_out = jtu.tree_map(lambda _: 0, out)
         return out, batch_axes_out
 
     prim.def_impl(impl)
@@ -325,21 +338,35 @@ def create_vprim(name: str, impl, abstract_eval, jvp, transpose):
 
 
 def _vprim_impl(*inputs, prim, __axis_size, __axis_name, __batch_axes, params):
-    impl = ft.partial(_vprim_impl_registry[prim], **params)
+    impl = ft.partial(_vprim_impl_registry[prim], **dict(params))
     impl = jax.vmap(
         impl, in_axes=__batch_axes, axis_size=__axis_size, axis_name=__axis_name
     )
     return impl(*inputs)
 
 
+if hasattr(jax.extend.core, "mapped_aval"):
+    _mapped_aval = jax.extend.core.mapped_aval  # pyright: ignore[reportAttributeAccessIssue]
+else:
+    _mapped_aval = jax.core.mapped_aval  # pyright: ignore[reportAttributeAccessIssue]
+if hasattr(jax.extend.core, "unmapped_aval"):
+    _unmapped_aval = jax.extend.core.unmapped_aval  # pyright: ignore[reportAttributeAccessIssue,reportAssignmentType]
+else:
+    _unmapped_aval = jax.core.unmapped_aval  # pyright: ignore[reportAttributeAccessIssue,reportAssignmentType]
+if jax.__version_info__ >= (0, 5, 1):
+    _old_unmapped_aval = _unmapped_aval
+
+    def _unmapped_aval(axis_size, axis_name, axis, aval):
+        del axis_name
+        return _old_unmapped_aval(axis_size, axis, aval)  # pyright: ignore[reportCallIssue]
+
+
 def _vprim_abstract_eval(*inputs, prim, __axis_size, __axis_name, __batch_axes, params):
     assert len(inputs) == len(__batch_axes)
-    inputs = [
-        jax.core.mapped_aval(__axis_size, b, x) for x, b in zip(inputs, __batch_axes)
-    ]
+    inputs = [_mapped_aval(__axis_size, b, x) for x, b in zip(inputs, __batch_axes)]
     abstract_eval = _vprim_abstract_eval_registry[prim]
-    outs = abstract_eval(*inputs, **params)
-    outs = [jax.core.unmapped_aval(__axis_size, __axis_name, 0, x) for x in outs]
+    outs = abstract_eval(*inputs, **dict(params))
+    outs = [_unmapped_aval(__axis_size, __axis_name, 0, x) for x in outs]
     return outs
 
 
@@ -371,7 +398,7 @@ def _vprim_jvp(
     assert len(tangents) == len(__batch_axes)
     tangents = [_resolve_zeros_t(t, b) for t, b in zip(tangents, __batch_axes)]
     batch_axes_t = [_resolve_zeros_b(t, b) for t, b in zip(tangents, __batch_axes)]
-    jvp = ft.partial(_vprim_jvp_registry[prim], **params)
+    jvp = ft.partial(_vprim_jvp_registry[prim], **dict(params))
     jvp = jax.vmap(
         jvp,
         in_axes=(__batch_axes, batch_axes_t),
@@ -409,7 +436,7 @@ def _vprim_transpose(
     batch_axes = [_resolve_undefined_b(i, b) for i, b in zip(inputs, __batch_axes)]
 
     def _transpose(*_inputs):
-        _outputs = _vprim_transpose_registry[prim](*_inputs, **params)
+        _outputs = _vprim_transpose_registry[prim](*_inputs, **dict(params))
         # `Zero` is not a JAX type -- it's an internal AD thing -- so we shouldn't pass
         # it across the `vmap` boundary. In particular JAX won't apply the out batch
         # axis to it.
