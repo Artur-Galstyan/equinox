@@ -1,5 +1,6 @@
 from typing import Generic, TypeVar
 
+import jax
 import jax.lax as lax
 import jax.numpy as jnp
 import jax.random as jr
@@ -75,7 +76,7 @@ class SpectralNorm(StatefulLayer, Generic[_Layer], strict=True):
         eps: float = 1e-12,
         inference: bool = False,
         exact: bool = False,
-        input_shape: Optional[jax.ShapeDtypeStruct] = None,
+        input_shape: jax.ShapeDtypeStruct | None = None,
         *,
         key: PRNGKeyArray,
     ):
