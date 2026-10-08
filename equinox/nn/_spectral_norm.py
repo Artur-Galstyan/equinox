@@ -28,25 +28,26 @@ _Layer = TypeVar("_Layer")
 
 
 class SpectralNorm(StatefulLayer, Generic[_Layer], strict=True):
-    """Applies spectral normalisation to a given parameter.
+    """Applies spectral normalisation to a named weight of a layer.
 
-    Given a weight matrix $W$, and letting $σ(W)$ denote (an approximation to) its
-    largest singular value, then this computes $W/σ(W)$.
+    Supports real linear or affine layers whose linear part scales proportionally
+    with that weight. The weight is divided by a spectral norm estimate; any bias
+    is left unchanged and excluded from the estimate.
 
-    The approximation $σ(W)$ is computed using
-    [power iterations](https://en.wikipedia.org/wiki/Power_iteration)
-    which are updated (as a side-effect) every time $W/σ(W)$ is computed.
+    With `exact=False`, the norm is estimated from the weight reshaped to a matrix.
+    With `exact=True`, it is estimated from the full layer operator for a fixed
+    input shape and dtype. Both modes use finite
+    [power iterations](https://en.wikipedia.org/wiki/Power_iteration), so
+    `exact=True` does not compute the exact spectral norm.
 
     Spectral normalisation is particularly commonly used when training generative
     adversarial networks; see
     [Spectral Normalization for Generative Adversarial Networks](https://arxiv.org/abs/1802.05957)
     for more details and motivation.
 
-    Default approaches to spectral normalization rely on inaccurate approximations to the
-    spectral norm, although it often perform better; see
+    For discussion of spectral normalisation approximations, see
     [Why Spectral Normalization Stabilizes GANs: Analysis and Improvements](https://arxiv.org/abs/2009.02773),
     and [Generalizable Adversarial Training via Spectral Normalization](https://arxiv.org/abs/1811.07457).
-    Equinox offers functionality for both exact and approximate spectral norms.
 
     !!! example
 
@@ -80,8 +81,9 @@ class SpectralNorm(StatefulLayer, Generic[_Layer], strict=True):
     ):
         """**Arguments:**
 
-        - `layer`: The layer to wrap. Usually a [`equinox.nn.Linear`][] or
-            a convolutional layer (e.g. [`equinox.nn.Conv2d`][]).
+        - `layer`: The real linear or affine layer to wrap. Usually a
+            [`equinox.nn.Linear`][] or a convolutional layer (e.g.
+            [`equinox.nn.Conv2d`][]).
         - `weight_name`: The name of the layer's parameter (a JAX array) to apply
             spectral normalisation to.
         - `num_power_iterations`: The number of power iterations to apply every time
@@ -90,26 +92,20 @@ class SpectralNorm(StatefulLayer, Generic[_Layer], strict=True):
         - `inference`: Whether this is in inference mode, at which time no power
             iterations are performed.  This may be toggled with
             [`equinox.nn.inference_mode`][].
-        - `exact`: Whether or not to compute the exact linear transpose for power series
-            iteration. Traditional approaches rely on reshaping >2D linear operators,
-            rather than doing the linear transpose in >2D.
-        - `input_shape`: If `exact` is true, the input structure to the layer must be
-            specified
+        - `exact`: If `True`, estimate the norm of the full layer's linear part
+            instead of the reshaped weight. Finite power iteration still gives an
+            estimate, not the exact norm.
+        - `input_shape`: Required when `exact=True`. A `jax.ShapeDtypeStruct` with
+            the input shape and dtype; subsequent inputs must match both.
         - `key`: A `jax.random.PRNGKey` used to provide randomness for initialisation.
             (Keyword only argument.)
 
 
         !!! info
 
-            The `dtype` of the weight array of the `layer` input is applied to all
-            parameters in this layer.
-
-
-        !!! Caution
-
-            If `exact` is true, it computes the transpose via `jax.linear_transpose` of
-            the layer. This includes all operations of the layer call, which means for
-            layers with a bias, this can result in the incorrect spectral value.
+            With `exact=False`, power iteration uses the weight dtype. With
+            `exact=True`, the initial vectors use the input and output dtypes
+            inferred from `input_shape`. JVP excludes any bias from the norm estimate.
 
         """
         self.layer = layer
@@ -193,10 +189,8 @@ class SpectralNorm(StatefulLayer, Generic[_Layer], strict=True):
                 for _ in range(self.num_power_iterations):
                     u, v = _power_iteration(layer, reverse, v, self.eps)
                 state = state.set(self.uv_index, (u, v))
-            else:
-                layer = self.layer
-            assert callable(layer)  # checked in __init__ but pyright wants it here too
-            _, tangents_out = jax.jvp(layer, (v,), (v,))
+            assert callable(self.layer)  # checked in __init__; for pyright
+            _, tangents_out = jax.jvp(self.layer, (v,), (v,))
             σ = jnp.sum(u * tangents_out)
             σ_weight = weight / σ
         else:

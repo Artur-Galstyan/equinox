@@ -1125,6 +1125,53 @@ def test_spectral_norm_exact(getkey):
     assert out.shape == (4, 6, 6, 6)
 
 
+@pytest.mark.parametrize("inference", (False, True))
+def test_spectral_norm_exact_scalar_gradient(inference, getkey):
+    x = jnp.array([2.0])
+    linear = eqx.nn.Linear(1, 1, key=getkey())
+    linear = eqx.tree_at(
+        lambda layer: (layer.weight, layer.bias),
+        linear,
+        (jnp.array([[2.0]]), jnp.array([0.25])),
+    )
+    spectral = eqx.nn.SpectralNorm(
+        linear,
+        "weight",
+        exact=True,
+        input_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+        key=getkey(),
+    )
+
+    def loss(model):
+        out, _ = model(x, eqx.nn.State(model), inference=inference)
+        return jnp.sum(out)
+
+    grad = eqx.filter_grad(loss)(spectral)
+    assert loss(spectral) == pytest.approx(2.25)
+    assert jnp.allclose(grad.layer.weight, 0, atol=1e-6)
+    assert jnp.allclose(grad.layer.bias, 1)
+
+
+def test_spectral_norm_exact_conv_operator(getkey):
+    x = jnp.arange(4, dtype=jnp.float32)[None, :]
+    conv = eqx.nn.Conv1d(1, 1, 2, use_bias=False, key=getkey())
+    conv = eqx.tree_at(lambda layer: layer.weight, conv, jnp.ones((1, 1, 2)))
+    spectral = eqx.nn.SpectralNorm(
+        conv,
+        "weight",
+        exact=True,
+        input_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+        num_power_iterations=30,
+        key=getkey(),
+    )
+    _, state = spectral(x, eqx.nn.State(spectral))
+    matrix = jax.jacfwd(lambda y: spectral(y, state, inference=True)[0])(x)
+    matrix = matrix.reshape(3, 4)
+    assert jnp.linalg.svd(matrix, compute_uv=False)[0] == pytest.approx(1, abs=1e-3)
+    # One row is the flattened kernel, whose norm differs from the full operator norm.
+    assert jnp.linalg.norm(matrix[0]) < 0.9
+
+
 def test_weight_norm(getkey):
     # Linear
     linear = eqx.nn.Linear(4, 4, key=getkey())
