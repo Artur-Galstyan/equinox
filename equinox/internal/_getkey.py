@@ -1,6 +1,5 @@
 import dataclasses
 import random
-from typing import Optional
 
 import jax.random as jr
 from jaxtyping import PRNGKeyArray
@@ -8,7 +7,7 @@ from jaxtyping import PRNGKeyArray
 from .._config import EQX_GETKEY_SEED
 
 
-# This offers reproducability -- the initial seed is printed in the repr so we can see
+# This offers reproducibility -- the initial seed is printed in the repr so we can see
 # it when a test fails.
 # Note the `eq=False`, which means that `GetKey `objects have `__eq__` and `__hash__`
 # based on object identity.
@@ -34,7 +33,7 @@ class GetKey:
     call: int
     key: PRNGKeyArray
 
-    def __init__(self, seed: Optional[int] = EQX_GETKEY_SEED):
+    def __init__(self, seed: int | None = EQX_GETKEY_SEED):
         if seed is None:
             seed = random.randint(0, 2**31 - 1)
         self.seed = seed

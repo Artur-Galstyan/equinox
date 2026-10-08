@@ -1,17 +1,18 @@
 import functools as ft
-from typing import Any, Union
+from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
+import numpy as np
 import pytest
 
 from .helpers import tree_allclose as _shaped_allclose
 
 
-(cpu,) = jax.devices("cpu")
+(cpu, _) = jax.devices("cpu")
 filter_pmap: Any = ft.partial(eqx.filter_pmap, devices=[cpu])  # pyright: ignore
 
 
@@ -96,7 +97,7 @@ def test_methods(call, outer):
     num_traces = 0
 
     class M(eqx.Module):
-        increment: Union[int, jax.Array]
+        increment: int | jax.Array
 
         if call:
 
@@ -203,15 +204,12 @@ def test_named_reduction():
         y = x + 1
         return jax.lax.psum(y, axis_name="device")
 
-    n = jax.local_device_count()
-    output = filter_pmap(f, axis_name="device")(jnp.zeros(n))
+    output = filter_pmap(f, axis_name="device")(jnp.zeros(1))
 
-    assert shaped_allclose(output, n * jnp.ones(n))
+    assert shaped_allclose(output, jnp.ones(1))
 
 
 def test_map_non_jax():
-    devices = jax.local_devices()
-
     # this contains a non-jax value for the `activation` field
     # and will therefore break filter_pmap if not filtered out
     # at input and output
@@ -226,7 +224,7 @@ def test_map_non_jax():
 
     def maybe_replicate(value):
         if eqx.is_array(value):
-            return jax.device_put_replicated(value, devices)
+            return jax.device_put(value[None], device=cpu)
         else:
             return value
 
@@ -272,18 +270,16 @@ def test_aot_compilation(donate):
     compiled(x, y)
 
 
-def test_double_if_mapped():
-    out_axes = eqx.internal.if_mapped(1)
+# https://github.com/patrick-kidger/equinox/issues/900
+# Unlike the vmap case we only test nonnegative integers, as pmap does not support
+# negative indexing for `in_axes` or `out_axes`.
+@pytest.mark.parametrize("out_axes", (0, 1, 2))
+def test_out_axes_with_at_least_three_dimensions(out_axes):
+    def foo(x):
+        return x * 2
 
-    def f(x):
-        assert x.shape == (3, 1)
-
-        def g(y):
-            assert y.shape == (1,)
-            return y + 1, x + 1
-
-        a, b = eqx.filter_vmap(g, out_axes=out_axes)(x)
-        assert a.shape == (1, 3)
-        assert b.shape == (3, 1)
-
-    filter_pmap(f)(jnp.arange(3).reshape(1, 3, 1))
+    x = jnp.arange(24).reshape((1, 2, 3, 4))
+    y = jax.pmap(foo, out_axes=out_axes)(x)
+    z = filter_pmap(foo, out_axes=out_axes)(x)
+    assert y.shape == z.shape
+    assert (np.array(y) == np.array(z)).all()

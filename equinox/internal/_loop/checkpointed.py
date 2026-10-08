@@ -50,7 +50,7 @@ import math
 import operator
 import typing
 from collections.abc import Callable, Sequence
-from typing import Any, cast, Optional, TypeVar, Union
+from typing import Any, cast, TypeVar
 
 import jax
 import jax.core
@@ -69,7 +69,7 @@ from .common import common_rewrite, fixed_asarray
 
 
 _T = TypeVar("_T")
-_Bool = Union[bool, Bool[Array, ""]]
+_Bool = bool | Bool[Array, ""]
 _Node = Any
 
 
@@ -78,9 +78,9 @@ def checkpointed_while_loop(
     body_fun: Callable[[_T], _T],
     init_val: _T,
     *,
-    max_steps: Optional[int] = None,
-    buffers: Optional[Callable[[_T], Union[_Node, Sequence[_Node]]]] = None,
-    checkpoints: Optional[int] = None,
+    max_steps: int | None = None,
+    buffers: Callable[[_T], _Node | Sequence[_Node]] | None = None,
+    checkpoints: int | None = None,
 ) -> _T:
     """Reverse-mode autodifferentiable while loop, using optimal online checkpointing.
 
@@ -946,14 +946,14 @@ def _checkpointed_while_loop_bwd(
     # Our strategy is as follows. First, consider those inputs that are perturbed, and
     # iterate to find all the carries that become perturbed as a result. We obtain a
     # fixed point.
-    # * This mimicks what JAX does in JVP rules for scans/whiles. And in fact we also
+    # * This mimics what JAX does in JVP rules for scans/whiles. And in fact we also
     #   track perturbation information forward via JVPs (which input tangents affect
     #   which output tangents), rather than backward via VJPs (which output cotangents
     #   affect which input cotangents), as this is what JAX does here and we'd like to
     #   be consistent. (Also, it seems like there might be a catch-22 trying to do this
     #   with VJPs -- how do you decide which inputs to perturb in your VJP?) This is
     #   basically handling criteria (1).
-    # * This also means that we're perturbing the minmal amount possible. We don't even
+    # * This also means that we're perturbing the minimal amount possible. We don't even
     #   run the JVP rule for something that isn't differentiated. This is part of
     #   addressing criteria (3).
     #
@@ -975,9 +975,9 @@ def _checkpointed_while_loop_bwd(
     # Phew! At that point, job done: we know which cotangents we're propagating and so
     # we can run our loop.
     #
-    # The first fixed point basically mimicks what JAX does in the JVP rule for a while
+    # The first fixed point basically mimics what JAX does in the JVP rule for a while
     # or scan, figuring out which values are perturbed. The second fixed point basically
-    # mimicks what JAX does in the transpose rule of a scan, figuring out which
+    # mimics what JAX does in the transpose rule of a scan, figuring out which
     # cotangents are symbolic zeros.
     #
 

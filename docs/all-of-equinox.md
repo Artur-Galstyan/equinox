@@ -17,15 +17,15 @@ import equinox as eqx
 import jax
 
 class NeuralNetwork(eqx.Module):
-    layers: list
+    layers: tuple
     extra_bias: jax.Array
 
     def __init__(self, key):
         key1, key2, key3 = jax.random.split(key, 3)
         # These contain trainable parameters.
-        self.layers = [eqx.nn.Linear(2, 8, key=key1),
+        self.layers = (eqx.nn.Linear(2, 8, key=key1),
                        eqx.nn.Linear(8, 8, key=key2),
-                       eqx.nn.Linear(8, 2, key=key3)]
+                       eqx.nn.Linear(8, 2, key=key3))
         # This is also a trainable parameter.
         self.extra_bias = jax.numpy.ones(2)
 
@@ -72,13 +72,13 @@ import functools as ft
 import jax
 
 class NeuralNetwork2(eqx.Module):
-    layers: list
+    layers: tuple
 
     def __init__(self, key):
         key1, key2 = jax.random.split(key)
-        self.layers = [eqx.nn.Linear(2, 8, key=key1),
+        self.layers = (eqx.nn.Linear(2, 8, key=key1),
                        jax.nn.relu,
-                       eqx.nn.Linear(8, 2, key=key2)]
+                       eqx.nn.Linear(8, 2, key=key2))
 
     def __call__(self, x):
         for layer in self.layers:
@@ -138,7 +138,7 @@ Finally, Equinox offers a number of more advanced goodies, like serialisation, d
 
 **Equinox integrates smoothly with JAX**
 
-Equinox introduces a powerful yet straightforward way to build neural networks, without introducing lots of new notions or tieing you into a framework. Indeed Equinox is a *library*, not a *framework* -- this means that anything you write in Equinox is fully compatible with anything else in the JAX ecosystem.
+Equinox introduces a powerful yet straightforward way to build neural networks, without introducing lots of new notions or tying you into a framework. Indeed Equinox is a *library*, not a *framework* -- this means that anything you write in Equinox is fully compatible with anything else in the JAX ecosystem.
 
 Equinox is all just regular JAX: PyTrees and transformations. Together, these two pieces allow us to specify complex models in JAX-friendly ways.
 

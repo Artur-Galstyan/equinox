@@ -11,11 +11,11 @@ Equinox modules are [dataclasses](https://docs.python.org/3/library/dataclasses.
 Equinox modules can be used as [abstract base classes](https://docs.python.org/3/library/abc.html), which means they support [`abc.abstractmethod`](https://docs.python.org/3/library/abc.html#abc.abstractmethod). Equinox extends this with support for abstract instance attributes and abstract class attributes.
 
 ::: equinox.AbstractVar
-    selection:
+    options:
         members: false
 
 ::: equinox.AbstractClassVar
-    selection:
+    options:
         members: false
 
 ## Checking invariants
@@ -84,39 +84,3 @@ This method has three key differences compared to the `__post_init__` provided b
 ## Creating wrapper modules
 
 ::: equinox.module_update_wrapper
-
-<!--
-## Strict modules
-
-Equinox supports an entirely optional "strict mode", for validating that you follow the abstract/final design pattern as discussed in [this style guide](../../../pattern/).
-
-When enabled via
-```python
-class Foo(eqx.Module, strict=True):
-    ...
-```
-then the following things are checked when you define your class (an error is raised if they fail).
-
-- That all base classes are also strict `eqx.Module`s.
-- That concrete classes are final.
-- The `__init__` method and all fields are all defined on a single class.
-- That abstract classes have names beginning with `"Abstract"`.
-- That no concrete method is overridden. For example, this will raise an error:
-    ```python
-    class Foo(eqx.Module):
-        def f(self): ...
-
-    class Bar(Foo, strict=True):
-        def f(self): ...
-    ```
-    but this is allowed:
-    ```python
-    class Abstract(eqx.Module):
-        @abc.abstractmethod
-        def f(self): ...
-
-    class Concrete(Abstract, strict=True):
-        def f(self): ...
-    ```
-
-Just the strict `Module` is checked. Subclasses will not become strict unless they also opt-in. This makes it possible to safely enable strict modules in a library, without affecting any downstream users.-->

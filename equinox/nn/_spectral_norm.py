@@ -1,6 +1,5 @@
-from typing import Generic, Optional, TypeVar
+from typing import Generic, TypeVar
 
-import jax
 import jax.lax as lax
 import jax.numpy as jnp
 import jax.random as jr
@@ -9,6 +8,7 @@ from jaxtyping import Array, Float, PRNGKeyArray
 from .._eval_shape import filter_eval_shape
 from .._module import field
 from .._tree import tree_at
+from ._misc import named_scope
 from ._sequential import StatefulLayer
 from ._stateful import State, StateIndex
 
@@ -146,14 +146,14 @@ class SpectralNorm(StatefulLayer, Generic[_Layer], strict=True):
         self.uv_index = StateIndex((u0, v0))
         self.exact = exact
 
-    @jax.named_scope("eqx.nn.SpectralNorm")
+    @named_scope("eqx.nn.SpectralNorm")
     def __call__(
         self,
         x: Array,
         state: State,
         *,
-        key: Optional[PRNGKeyArray] = None,
-        inference: Optional[bool] = None,
+        key: PRNGKeyArray | None = None,
+        inference: bool | None = None,
     ) -> tuple[Array, State]:
         """**Arguments:**
 

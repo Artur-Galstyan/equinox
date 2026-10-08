@@ -1,8 +1,4 @@
 # Backward compatibility: expose via `equinox.internal`. Now available under `equinox`.
-from .._better_abstract import (
-    AbstractClassVar as AbstractClassVar,
-    AbstractVar as AbstractVar,
-)
 from .._compile_utils import (
     hashable_combine as hashable_combine,
     hashable_partition as hashable_partition,
@@ -20,8 +16,12 @@ from .._errors import (
 )
 from .._eval_shape import cached_filter_eval_shape as cached_filter_eval_shape
 from .._misc import left_broadcast_to as left_broadcast_to
-from .._module import Static as Static
-from .._pretty_print import tree_pp as tree_pp
+from .._module import (
+    AbstractClassVar as AbstractClassVar,
+    AbstractVar as AbstractVar,
+    Static as Static,
+)
+from .._pretty_print import TreeWLCustom as TreeWLCustom
 from .._unvmap import (
     unvmap_all as unvmap_all,
     unvmap_all_p as unvmap_all_p,
@@ -30,7 +30,6 @@ from .._unvmap import (
     unvmap_max as unvmap_max,
     unvmap_max_p as unvmap_max_p,
 )
-from .._vmap_pmap import if_mapped as if_mapped
 
 # Backward compatibility: expose via `equinox.internal`. Now available under
 # `equinox.debug`.
@@ -88,5 +87,11 @@ from ._primitive import (
     filter_primitive_jvp as filter_primitive_jvp,
     filter_primitive_transpose as filter_primitive_transpose,
     materialise_zeros as materialise_zeros,
+)
+from ._progress_meter import (
+    AbstractProgressMeter as AbstractProgressMeter,
+    NoProgressMeter as NoProgressMeter,
+    TextProgressMeter as TextProgressMeter,
+    TqdmProgressMeter as TqdmProgressMeter,
 )
 from ._str2jax import str2jax as str2jax

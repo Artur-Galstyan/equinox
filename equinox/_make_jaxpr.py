@@ -4,7 +4,7 @@ from typing_extensions import ParamSpec
 
 import jax
 import jax._src.traceback_util as traceback_util
-import jax.core
+import jax.extend.core
 import jax.tree_util as jtu
 from jaxtyping import PyTree
 
@@ -40,7 +40,7 @@ class _MakeJaxpr(Module):
             _out_dynamic, _out_static = partition(_out, is_array)
             return _out_dynamic, Static(_out_static)
 
-        jaxpr, out_struct = jax.make_jaxpr(_fn, return_shape=True)(*dynamic_flat)  # pyright: ignore
+        jaxpr, out_struct = jax.make_jaxpr(_fn, return_shape=True)(*dynamic_flat)
         dynamic_out_struct, static_out = out_struct
         static_out = static_out.value
         return jaxpr, dynamic_out_struct, static_out
@@ -49,7 +49,7 @@ class _MakeJaxpr(Module):
 def filter_make_jaxpr(
     fun: Callable[_P, Any],
 ) -> Callable[
-    _P, tuple[jax.core.ClosedJaxpr, PyTree[jax.ShapeDtypeStruct], PyTree[Any]]
+    _P, tuple[jax.extend.core.ClosedJaxpr, PyTree[jax.ShapeDtypeStruct], PyTree[Any]]
 ]:
     """As `jax.make_jaxpr`, but accepts arbitrary PyTrees as input and output.
 
@@ -70,7 +70,7 @@ def filter_make_jaxpr(
 
     The example arguments to be traced may be anything with `.shape` and `.dtype`
     fields (typically JAX arrays, NumPy arrays, of `jax.ShapeDtypeStruct`s). All
-    other argments are treated statically. In particular, Python builtins (`bool`,
+    other arguments are treated statically. In particular, Python builtins (`bool`,
     `int`, `float`, `complex`) are treated as static inputs; wrap them in JAX/NumPy
     arrays if you would like them to be traced.
     """

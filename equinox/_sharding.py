@@ -1,22 +1,22 @@
-from typing import Any, Union
+from typing import Any
 
 import jax
 import jax.lax as lax
-from jaxlib.xla_extension import Device
 from jaxtyping import PyTree
 
 from ._filters import combine, is_array, partition
 
 
 def filter_shard(
-    x: PyTree[Any], device_or_shardings: Union[Device, jax.sharding.Sharding]
+    x: PyTree[Any],
+    device_or_shardings: jax.Device | jax.sharding.Sharding,  # pyright: ignore[reportInvalidTypeForm]
 ):
     """Filtered transform combining `jax.lax.with_sharding_constraint`
     and `jax.device_put`.
 
     Enforces sharding within a JIT'd computation (That is, how an array is
-    split between multiple devices, i.e. multiple GPUs/TPUs.), or moves `x` to
-    a device.
+    split between multiple devices, i.e. multiple GPUs/TPUs.), or outside a
+    JIT'd region moves `x` to a device.
 
     **Arguments:**
 
@@ -30,12 +30,15 @@ def filter_shard(
     A copy of `x` with the specified sharding constraints.
 
     !!! Example
-        See also the [autoparallelism example](../../examples/parallelism).
+        See also the [autoparallelism example](../examples/parallelism.ipynb).
     """
-    if isinstance(device_or_shardings, Device):
+    if isinstance(device_or_shardings, jax.Device):
         shardings = jax.sharding.SingleDeviceSharding(device_or_shardings)
     else:
         shardings = device_or_shardings
     dynamic, static = partition(x, is_array)
+    # `with_sharding_constraint` is documented in JAX for jitted
+    # regions, while `device_put` is used for non-jitted regions.
+    # However, it suffices to simply call `with_sharding_constraint` here!
     dynamic = lax.with_sharding_constraint(dynamic, shardings)
     return combine(dynamic, static)

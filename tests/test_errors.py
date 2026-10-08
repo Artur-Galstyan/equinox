@@ -1,3 +1,5 @@
+import re
+
 import equinox as eqx
 import equinox.internal as eqxi
 import jax
@@ -11,17 +13,16 @@ def _f(x):
 
 
 # Strangely, JAX raises different errors depending on context.
-_error = pytest.raises((ValueError, RuntimeError))
+_error = pytest.raises((ValueError, RuntimeError), match="x must be non-negative")
 
 
 def test_basic():
     jf = jax.jit(_f)
     _f(1.0)
     jf(1.0)
-    with _error:
-        _f(-1.0)
-    with _error:
+    with _error as exc:
         jf(-1.0)
+    assert "Batch index" not in str(exc.value)
 
 
 def test_vmap():
@@ -33,13 +34,33 @@ def test_vmap():
 
     vf(good)
     jvf(good)
-    with _error:
+    with pytest.raises(
+        (ValueError, RuntimeError),
+        match=re.escape("Batch index (1,) had error:\nx must be non-negative"),
+    ) as exc:
         vf(bad1)
-    with _error:
+    assert "Batch index (0,)" not in str(exc.value)
+    with pytest.raises(
+        (ValueError, RuntimeError),
+        match=re.escape(
+            "Batch index (0,) had error:\nx must be non-negative\n\n"
+            "Batch index (1,) had error:\nx must be non-negative"
+        ),
+    ):
         vf(bad2)
-    with _error:
+    with pytest.raises(
+        (ValueError, RuntimeError),
+        match=re.escape("Batch index (1,) had error:\nx must be non-negative"),
+    ) as exc:
         jvf(bad1)
-    with _error:
+    assert "Batch index (0,)" not in str(exc.value)
+    with pytest.raises(
+        (ValueError, RuntimeError),
+        match=re.escape(
+            "Batch index (0,) had error:\nx must be non-negative\n\n"
+            "Batch index (1,) had error:\nx must be non-negative"
+        ),
+    ):
         jvf(bad2)
 
 
@@ -84,18 +105,8 @@ def test_tracetime():
     def f(x):
         return eqx.error_if(x, True, "hi")
 
-    with pytest.raises(Exception):
+    with pytest.raises((ValueError, RuntimeError), match="hi"):
         f(1.0)
-
-
-def test_nan_tracetime():
-    @jax.jit
-    def f(x):
-        return eqx.error_if(x, True, "hi", on_error="nan")
-
-    with pytest.warns(UserWarning):
-        y = f(1.0)
-    assert jnp.isnan(y)
 
 
 def test_nan():
@@ -105,6 +116,22 @@ def test_nan():
 
     y = f(1.0, True)
     assert jnp.isnan(y)
+
+
+def test_off_tracetime():
+    @jax.jit
+    def f(x):
+        return eqx.error_if(x, True, "hi", on_error="off") + 1
+
+    assert jnp.isclose(f(1.0), 2.0)
+
+
+def test_off():
+    @jax.jit
+    def f(x, pred):
+        return eqx.error_if(x, pred, "hi", on_error="off")
+
+    assert jnp.isclose(f(1.0, True), 1.0)
 
 
 def test_assert_dce():
@@ -126,7 +153,7 @@ def test_assert_dce():
         g(1.0)
 
 
-def test_traceback_runtime_eqx():
+def test_traceback_runtime_eqx(caplog):
     @eqx.filter_jit
     def f(x):
         return g(x)
@@ -138,8 +165,10 @@ def test_traceback_runtime_eqx():
     try:
         f(jnp.array(1.0))
     except Exception as e:
+        assert caplog.text == ""
         assert e.__cause__ is None
         msg = str(e).strip()
+        assert msg.startswith("Above is the stack outside of JIT")
         assert "egads" in msg
         assert "EQX_ON_ERROR" in msg
 
@@ -162,6 +191,18 @@ def test_traceback_runtime_custom():
     try:
         f(jnp.array(1.0))
     except Exception as e:
-        # assert e.__cause__ is None  # varies by Python version and JAX version.
         assert "egads" in str(e)
         assert "EQX_ON_ERROR" not in str(e)
+
+
+# https://github.com/patrick-kidger/equinox/issues/1156
+def test_error_after_success():
+    @eqx.filter_jit
+    def foo(x):
+        return eqx.error_if(x, x > 0.0, "foo")
+
+    foo(jnp.array(-1.0))
+    try:
+        foo(jnp.array(1.0))
+    except Exception as e:
+        assert type(e) is eqx.EquinoxRuntimeError

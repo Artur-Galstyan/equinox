@@ -1,5 +1,4 @@
 import warnings
-from typing import Union
 
 import equinox as eqx
 import jax
@@ -7,6 +6,7 @@ import jax.nn as jnn
 import jax.numpy as jnp
 import jax.random as jrandom
 import pytest
+from jax._src.dtypes import TypePromotionError
 
 
 def test_custom_init():
@@ -21,6 +21,16 @@ def test_custom_init():
 
 
 def test_linear(getkey):
+    # Zero input shape
+    linear = eqx.nn.Linear(0, 4, key=getkey())
+    x = jrandom.normal(getkey(), (0,))
+    assert linear(x).shape == (4,)
+
+    # Zero output shape
+    linear = eqx.nn.Linear(4, 0, key=getkey())
+    x = jrandom.normal(getkey(), (4,))
+    assert linear(x).shape == (0,)
+
     # Positional arguments
     linear = eqx.nn.Linear(3, 4, key=getkey())
     x = jrandom.normal(getkey(), (3,))
@@ -132,7 +142,7 @@ def test_sequential(getkey):
         [
             eqx.nn.Linear(2, 4, key=getkey()),
             eqx.nn.Linear(4, 1, key=getkey()),
-            eqx.nn.BatchNorm(1, axis_name="batch"),
+            eqx.nn.BatchNorm(1, axis_name="batch", mode="ema"),
             eqx.nn.Linear(1, 3, key=getkey()),
         ]
     )
@@ -166,7 +176,7 @@ def test_nested_sequential(inner_stateful, outer_stateful, getkey):
         inner_seq = eqx.nn.Sequential(
             [
                 eqx.nn.Linear(2, 4, key=getkey()),
-                eqx.nn.BatchNorm(4, axis_name="batch")
+                eqx.nn.BatchNorm(4, axis_name="batch", mode="ema")
                 if inner_stateful
                 else eqx.nn.Identity(),
                 eqx.nn.Linear(4, 3, key=getkey()),
@@ -176,7 +186,7 @@ def test_nested_sequential(inner_stateful, outer_stateful, getkey):
             [
                 eqx.nn.Linear(5, 2, key=getkey()),
                 inner_seq,
-                eqx.nn.BatchNorm(3, axis_name="batch")
+                eqx.nn.BatchNorm(3, axis_name="batch", mode="ema")
                 if outer_stateful
                 else eqx.nn.Identity(),
                 eqx.nn.Linear(3, 6, key=getkey()),
@@ -198,33 +208,129 @@ def test_nested_sequential(inner_stateful, outer_stateful, getkey):
     assert out.shape == (1, 6)
 
 
-def test_mlp(getkey):
-    mlp = eqx.nn.MLP(2, 3, 8, 2, key=getkey())
+def _assert_bias(
+    depth: int, scan: bool, mlp: eqx.nn.MLP, use_bias: bool, use_final_bias: bool
+):
+    if depth == 0:
+        [layer] = mlp.layers
+        assert layer.use_bias == use_final_bias
+    elif scan:
+        [input, hidden, output] = mlp.layers
+        assert input.use_bias == use_bias
+        assert hidden.use_bias == use_bias
+        assert output.use_bias == use_final_bias
+    else:
+        [*early, output] = mlp.layers
+        assert len(early) == depth
+        assert all(e.use_bias == use_bias for e in early)
+        assert output.use_bias == use_final_bias
+
+
+@pytest.mark.parametrize("scan", (False, True), ids=["no_scan", "scan"])
+@pytest.mark.parametrize("depth", (0, 1, 2))
+def test_mlp(getkey, scan, depth):
+    mlp = eqx.nn.MLP(2, 3, 8, depth=depth, scan=scan, key=getkey())
     x = jrandom.normal(getkey(), (2,))
     assert mlp(x).shape == (3,)
 
-    mlp = eqx.nn.MLP(in_size=2, out_size=3, width_size=8, depth=2, key=getkey())
+    mlp = eqx.nn.MLP(
+        in_size=2, out_size=3, width_size=8, depth=depth, scan=scan, key=getkey()
+    )
     x = jrandom.normal(getkey(), (2,))
     assert mlp(x).shape == (3,)
 
-    mlp = eqx.nn.MLP("scalar", 2, 2, 2, key=getkey())
+    mlp = eqx.nn.MLP("scalar", 2, 2, depth=depth, scan=scan, key=getkey())
     x = jrandom.normal(getkey(), ())
     assert mlp(x).shape == (2,)
 
-    mlp = eqx.nn.MLP(2, "scalar", 2, 2, key=getkey())
+    mlp = eqx.nn.MLP(2, "scalar", 2, depth=depth, scan=scan, key=getkey())
     x = jrandom.normal(getkey(), (2,))
     assert mlp(x).shape == ()
-    assert [mlp.layers[i].use_bias for i in range(0, 3)] == [True, True, True]
+    _assert_bias(depth, scan, mlp, use_bias=True, use_final_bias=True)
 
-    mlp = eqx.nn.MLP(2, 3, 8, 2, use_bias=False, use_final_bias=True, key=getkey())
+    mlp = eqx.nn.MLP(
+        2,
+        3,
+        8,
+        depth=depth,
+        use_bias=False,
+        use_final_bias=True,
+        scan=scan,
+        key=getkey(),
+    )
     x = jrandom.normal(getkey(), (2,))
     assert mlp(x).shape == (3,)
-    assert [mlp.layers[i].use_bias for i in range(0, 3)] == [False, False, True]
+    _assert_bias(depth, scan, mlp, use_bias=False, use_final_bias=True)
 
-    mlp = eqx.nn.MLP(2, 3, 8, 2, use_bias=True, use_final_bias=False, key=getkey())
+    mlp = eqx.nn.MLP(
+        2,
+        3,
+        8,
+        depth=depth,
+        use_bias=True,
+        use_final_bias=False,
+        scan=scan,
+        key=getkey(),
+    )
     x = jrandom.normal(getkey(), (2,))
     assert mlp(x).shape == (3,)
-    assert [mlp.layers[i].use_bias for i in range(0, 3)] == [True, True, False]
+    _assert_bias(depth, scan, mlp, use_bias=True, use_final_bias=False)
+
+
+def test_scan_over_mlp_depth_one(getkey):
+    """Test the edge case of depth=1, which has zero hidden layers to scan over.
+
+    When depth=1, hidden_keys = keys[1:depth] evaluates to keys[1:1], resulting in
+    an empty array and zero hidden layers. The network should consist of only an
+    input layer and output layer, matching the behavior of MLP(depth=1).
+    """
+    # Test basic functionality with depth=1
+    scan_mlp = eqx.nn.MLP(2, 3, 8, depth=1, scan=True, key=getkey())
+    x = jrandom.normal(getkey(), (2,))
+    out = scan_mlp(x)
+    assert out.shape == (3,)
+
+    # Compare with regular MLP of depth=1
+    mlp_key = getkey()
+    mlp = eqx.nn.MLP(2, 3, 8, depth=1, key=mlp_key)
+    scan_mlp_same_key = eqx.nn.MLP(2, 3, 8, depth=1, scan=True, key=mlp_key)
+    x = jrandom.normal(getkey(), (2,))
+    # With the same random key, outputs should be identical
+    assert jnp.allclose(mlp(x), scan_mlp_same_key(x))
+
+    # Test with scalar input
+    scan_mlp = eqx.nn.MLP("scalar", 3, 8, depth=1, scan=True, key=getkey())
+    x = jrandom.normal(getkey(), ())
+    assert scan_mlp(x).shape == (3,)
+
+    # Test with scalar output
+    scan_mlp = eqx.nn.MLP(2, "scalar", 8, depth=1, scan=True, key=getkey())
+    x = jrandom.normal(getkey(), (2,))
+    assert scan_mlp(x).shape == ()
+
+    # Verify layer structure
+    input_layer, hidden_layers, output_layer = scan_mlp.layers
+    assert isinstance(input_layer, eqx.nn.Linear)
+    assert isinstance(output_layer, eqx.nn.Linear)
+    # hidden_layers should be an empty vmapped structure
+    dynamic, _ = eqx.partition(hidden_layers, eqx.is_array)
+    # Check that dynamic parts have zero layers (axis size 0)
+    if hasattr(dynamic, "weight"):
+        assert dynamic.weight.shape[0] == 0  # First dimension should be 0 (no layers)
+
+    # Test gradients work correctly
+    @eqx.filter_jit
+    @eqx.filter_grad
+    def loss_fn(model, x):
+        return jnp.sum(model(x) ** 2)
+
+    scan_mlp = eqx.nn.MLP(2, 3, 8, depth=1, scan=True, key=getkey())
+    x = jrandom.normal(getkey(), (2,))
+    grads = loss_fn(scan_mlp, x)
+    # Verify gradients exist for input and output layers
+    input_layer_grad, _, output_layer_grad = grads.layers
+    assert input_layer_grad.weight is not None
+    assert output_layer_grad.weight is not None
 
 
 def test_mlp_learnt_activation():
@@ -235,6 +341,31 @@ def test_mlp_learnt_activation():
         2,
         activation=eqx.nn.PReLU(),
         final_activation=eqx.nn.PReLU(),
+        key=jrandom.PRNGKey(5678),
+    )
+    x = jnp.array([0.5, 0.7])
+    assert mlp.activation.negative_slope.shape == (2, 8)  # pyright: ignore
+    assert mlp.final_activation.negative_slope.shape == (5,)  # pyright: ignore
+
+    @eqx.filter_jit
+    @eqx.filter_grad
+    def grad(mlp, x):
+        return jnp.sum(mlp(x))
+
+    grads = grad(mlp, x)
+    assert grads.activation.negative_slope.shape == (2, 8)
+    assert grads.final_activation.negative_slope.shape == (5,)
+
+
+def test_scan_over_mlp_learnt_activation():
+    mlp = eqx.nn.MLP(
+        2,
+        5,
+        8,
+        2,
+        activation=eqx.nn.PReLU(),
+        final_activation=eqx.nn.PReLU(),
+        scan=True,
         key=jrandom.PRNGKey(5678),
     )
     x = jnp.array([0.5, 0.7])
@@ -289,14 +420,33 @@ def test_conv1d(getkey):
 
     # Test value matches
     conv = eqx.nn.Conv1d(1, 3, kernel_size=3, padding=1, key=getkey())
-    new_weight = jnp.arange(9).reshape(3, 1, 3)
-    new_bias = jnp.array([1, 2, 3]).reshape(3, 1)
-    data = jnp.arange(-3, 3).reshape(1, -1)
+    new_weight = jnp.arange(9, dtype=jnp.float32).reshape(3, 1, 3)
+    new_bias = jnp.array([1.0, 2.0, 3.0]).reshape(3, 1)
+    data = jnp.arange(-3, 3, dtype=jnp.float32).reshape(1, -1)
     assert new_weight.shape == conv.weight.shape
     assert new_bias.shape == conv.bias.shape  # pyright: ignore
     conv = eqx.tree_at(lambda x: (x.weight, x.bias), conv, (new_weight, new_bias))
     answer = jnp.array(
-        [-6, -3, 0, 3, 6, 3, -20, -20, -8, 4, 16, 13, -34, -37, -16, 5, 26, 23]
+        [
+            -6.0,
+            -3.0,
+            0.0,
+            3.0,
+            6.0,
+            3.0,
+            -20.0,
+            -20.0,
+            -8.0,
+            4.0,
+            16.0,
+            13.0,
+            -34.0,
+            -37.0,
+            -16.0,
+            5.0,
+            26.0,
+            23.0,
+        ]
     ).reshape(3, 6)
     assert jnp.allclose(conv(data), answer)
 
@@ -339,13 +489,15 @@ def test_conv2d(getkey):
 
     # Test value matches
     conv = eqx.nn.Conv2d(1, 1, kernel_size=3, padding=1, key=getkey())
-    new_weight = jnp.arange(9).reshape(1, 1, 3, 3)
-    new_bias = jnp.array([1]).reshape(1, 1, 1)
-    data = jnp.arange(-4, 5).reshape(1, 3, 3)
+    new_weight = jnp.arange(9, dtype=jnp.float32).reshape(1, 1, 3, 3)
+    new_bias = jnp.array([1], dtype=jnp.float32).reshape(1, 1, 1)
+    data = jnp.arange(-4, 5, dtype=jnp.float32).reshape(1, 3, 3)
     assert new_weight.shape == conv.weight.shape
     assert new_bias.shape == conv.bias.shape  # pyright: ignore
     conv = eqx.tree_at(lambda x: (x.weight, x.bias), conv, (new_weight, new_bias))
-    answer = jnp.array([-37, -31, -9, 25, 61, 49, 23, 41, 27]).reshape(1, 3, 3)
+    answer = jnp.array(
+        [-37.0, -31.0, -9.0, 25.0, 61.0, 49.0, 23.0, 41.0, 27.0]
+    ).reshape(1, 3, 3)
     assert jnp.allclose(conv(data), answer)
 
     # Test complex value matches
@@ -356,7 +508,9 @@ def test_conv2d(getkey):
     assert new_weight.shape == conv.weight.shape
     assert new_bias.shape == conv.bias.shape  # pyright: ignore
     conv = eqx.tree_at(lambda x: (x.weight, x.bias), conv, (new_weight, new_bias))
-    answer = jnp.array([-37, -31, -9, 25, 61, 49, 23, 41, 27]).reshape(1, 3, 3)
+    answer = jnp.array(
+        [-37.0, -31.0, -9.0, 25.0, 61.0, 49.0, 23.0, 41.0, 27.0]
+    ).reshape(1, 3, 3)
     answer = (1 + 1j) * answer.astype(jnp.complex64)
     assert jnp.allclose(conv(data), answer)
 
@@ -366,22 +520,24 @@ def test_conv2d(getkey):
     # and multiply one copy by 2. Also, we modify the bias
     new_weight = jnp.concatenate(
         [
-            1 * jnp.arange(9).reshape(1, 1, 3, 3),
-            2 * jnp.arange(9).reshape(1, 1, 3, 3),
+            1 * jnp.arange(9, dtype=jnp.float32).reshape(1, 1, 3, 3),
+            2 * jnp.arange(9, dtype=jnp.float32).reshape(1, 1, 3, 3),
         ],
         axis=0,
     )
-    new_bias = jnp.array([1, 2]).reshape(2, 1, 1)
+    new_bias = jnp.array([1.0, 2.0]).reshape(2, 1, 1)
 
     data = jnp.broadcast_to(
-        jnp.arange(-4, 5).reshape(1, 3, 3),
+        jnp.arange(-4, 5, dtype=jnp.float32).reshape(1, 3, 3),
         (2, 3, 3),
     )
     assert new_weight.shape == conv.weight.shape
     assert new_bias.shape == conv.bias.shape  # pyright: ignore
     conv = eqx.tree_at(lambda x: (x.weight, x.bias), conv, (new_weight, new_bias))
     # this is the multiplication part, without the bias
-    answer_part = jnp.array([-38, -32, -10, 24, 60, 48, 22, 40, 26]).reshape(1, 3, 3)
+    answer_part = jnp.array(
+        [-38.0, -32.0, -10.0, 24.0, 60.0, 48.0, 22.0, 40.0, 26.0]
+    ).reshape(1, 3, 3)
     answer = (
         jnp.concatenate(
             [
@@ -433,13 +589,15 @@ def test_conv3d(getkey):
 
     # Test value matches
     conv = eqx.nn.Conv3d(1, 1, kernel_size=(2, 1, 1), padding=(1, 0, 0), key=getkey())
-    new_weight = jnp.arange(2).reshape(1, 1, 2, 1, 1)
-    new_bias = jnp.array([1]).reshape(1, 1, 1, 1)
-    data = jnp.arange(-4, 4).reshape(1, 2, 2, 2)
+    new_weight = jnp.arange(2, dtype=jnp.float32).reshape(1, 1, 2, 1, 1)
+    new_bias = jnp.array([1.0]).reshape(1, 1, 1, 1)
+    data = jnp.arange(-4, 4, dtype=jnp.float32).reshape(1, 2, 2, 2)
     assert new_weight.shape == conv.weight.shape
     assert new_bias.shape == conv.bias.shape  # pyright: ignore
     conv = eqx.tree_at(lambda x: (x.weight, x.bias), conv, (new_weight, new_bias))
-    answer = jnp.array([-3, -2, -1, 0, 1, 2, 3, 4, 1, 1, 1, 1]).reshape(1, 3, 2, 2)
+    answer = jnp.array(
+        [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 1.0, 1.0, 1.0, 1.0]
+    ).reshape(1, 3, 2, 2)
     assert jnp.allclose(conv(data), answer)
 
 
@@ -490,38 +648,38 @@ def test_convtranspose1d(getkey):
 
     # Test value matches
     conv = eqx.nn.ConvTranspose1d(1, 3, kernel_size=3, padding=0, key=getkey())
-    new_weight = jnp.arange(9).reshape(3, 1, 3)
-    new_bias = jnp.array([1, 2, 3]).reshape(3, 1)
-    data = jnp.arange(-3, 3).reshape(1, -1)
+    new_weight = jnp.arange(9, dtype=jnp.float32).reshape(3, 1, 3)
+    new_bias = jnp.array([1.0, 2.0, 3.0]).reshape(3, 1)
+    data = jnp.arange(-3, 3, dtype=jnp.float32).reshape(1, -1)
     assert new_weight.shape == conv.weight.shape
     assert new_bias.shape == conv.bias.shape  # pyright: ignore
     conv = eqx.tree_at(lambda x: (x.weight, x.bias), conv, (new_weight, new_bias))
     answer = jnp.array(
         [
-            -5,
-            -6,
-            -3,
-            0,
-            3,
-            6,
-            3,
-            1,
-            -13,
-            -20,
-            -20,
-            -8,
-            4,
-            16,
-            13,
-            8,
-            -21,
-            -34,
-            -37,
-            -16,
-            5,
-            26,
-            23,
-            15,
+            -5.0,
+            -6.0,
+            -3.0,
+            0.0,
+            3.0,
+            6.0,
+            3.0,
+            1.0,
+            -13.0,
+            -20.0,
+            -20.0,
+            -8.0,
+            4.0,
+            16.0,
+            13.0,
+            8.0,
+            -21.0,
+            -34.0,
+            -37.0,
+            -16.0,
+            5.0,
+            26.0,
+            23.0,
+            15.0,
         ]
     ).reshape(3, 8)
     assert jnp.all(conv(data) == answer)
@@ -550,13 +708,15 @@ def test_convtranspose2d(getkey):
 
     # Test value matches
     conv = eqx.nn.ConvTranspose2d(1, 1, kernel_size=3, padding=1, key=getkey())
-    new_weight = jnp.arange(9).reshape(1, 1, 3, 3)
-    new_bias = jnp.array([1]).reshape(1, 1, 1)
-    data = jnp.arange(-4, 5).reshape(1, 3, 3)
+    new_weight = jnp.arange(9, dtype=jnp.float32).reshape(1, 1, 3, 3)
+    new_bias = jnp.array([1.0]).reshape(1, 1, 1)
+    data = jnp.arange(-4, 5, dtype=jnp.float32).reshape(1, 3, 3)
     assert new_weight.shape == conv.weight.shape
     assert new_bias.shape == conv.bias.shape  # pyright: ignore
     conv = eqx.tree_at(lambda x: (x.weight, x.bias), conv, (new_weight, new_bias))
-    answer = jnp.array([-37, -31, -9, 25, 61, 49, 23, 41, 27]).reshape(1, 3, 3)
+    answer = jnp.array(
+        [-37.0, -31.0, -9.0, 25.0, 61.0, 49.0, 23.0, 41.0, 27.0]
+    ).reshape(1, 3, 3)
     assert jnp.all(conv(data) == answer)
 
     # Test groups
@@ -567,22 +727,24 @@ def test_convtranspose2d(getkey):
     # and multiply one copy by 2. Also, we modify the bias
     new_weight = jnp.concatenate(
         [
-            1 * jnp.arange(9).reshape(1, 1, 3, 3),
-            2 * jnp.arange(9).reshape(1, 1, 3, 3),
+            1 * jnp.arange(9, dtype=jnp.float32).reshape(1, 1, 3, 3),
+            2 * jnp.arange(9, dtype=jnp.float32).reshape(1, 1, 3, 3),
         ],
         axis=0,
     )
-    new_bias = jnp.array([1, 2]).reshape(2, 1, 1)
+    new_bias = jnp.array([1.0, 2.0]).reshape(2, 1, 1)
 
     data = jnp.broadcast_to(
-        jnp.arange(-4, 5).reshape(1, 3, 3),
+        jnp.arange(-4, 5, dtype=jnp.float32).reshape(1, 3, 3),
         (2, 3, 3),
     )
     assert new_weight.shape == conv.weight.shape
     assert new_bias.shape == conv.bias.shape  # pyright: ignore
     conv = eqx.tree_at(lambda x: (x.weight, x.bias), conv, (new_weight, new_bias))
     # this is the multiplication part, without the bias
-    answer_part = jnp.array([-38, -32, -10, 24, 60, 48, 22, 40, 26]).reshape(1, 3, 3)
+    answer_part = jnp.array(
+        [-38.0, -32.0, -10.0, 24.0, 60.0, 48.0, 22.0, 40.0, 26.0]
+    ).reshape(1, 3, 3)
     answer = (
         jnp.concatenate(
             [
@@ -621,41 +783,41 @@ def test_convtranspose3d(getkey):
     conv = eqx.nn.ConvTranspose3d(
         1, 1, kernel_size=(2, 2, 2), padding=(0, 0, 0), key=getkey()
     )
-    new_weight = jnp.arange(8).reshape(1, 1, 2, 2, 2)
-    new_bias = jnp.array([1]).reshape(1, 1, 1, 1)
-    data = jnp.arange(-4, 4).reshape(1, 2, 2, 2)
+    new_weight = jnp.arange(8, dtype=jnp.float32).reshape(1, 1, 2, 2, 2)
+    new_bias = jnp.array([1.0]).reshape(1, 1, 1, 1)
+    data = jnp.arange(-4, 4, dtype=jnp.float32).reshape(1, 2, 2, 2)
     assert new_weight.shape == conv.weight.shape
     assert new_bias.shape == conv.bias.shape  # pyright: ignore
     conv = eqx.tree_at(lambda x: (x.weight, x.bias), conv, (new_weight, new_bias))
     answer = jnp.array(
         [
-            -27,
-            -44,
-            -17,
-            -33,
-            -49,
-            -17,
-            -9,
-            -12,
-            -3,
-            -11,
-            -9,
-            1,
-            5,
-            29,
-            21,
-            9,
-            23,
-            13,
-            1,
-            4,
-            3,
-            7,
-            15,
-            7,
-            3,
-            4,
-            1,
+            -27.0,
+            -44.0,
+            -17.0,
+            -33.0,
+            -49.0,
+            -17.0,
+            -9.0,
+            -12.0,
+            -3.0,
+            -11.0,
+            -9.0,
+            1.0,
+            5.0,
+            29.0,
+            21.0,
+            9.0,
+            23.0,
+            13.0,
+            1.0,
+            4.0,
+            3.0,
+            7.0,
+            15.0,
+            7.0,
+            3.0,
+            4.0,
+            1.0,
         ]
     ).reshape(1, 3, 3, 3)
     assert jnp.all(conv(data) == answer)
@@ -885,11 +1047,19 @@ def test_layer_norm(getkey):
     assert jnp.allclose(ln(x1), ln(x2), atol=1e-4)
     assert jnp.allclose(ln(x1), x3, atol=1e-4)
 
+    ln = eqx.nn.LayerNorm(128, dtype=jnp.bfloat16)
+    x = jrandom.uniform(getkey(), (128,), dtype=jnp.bfloat16)
+    assert ln(x).dtype == jnp.bfloat16
+
 
 def test_group_norm(getkey):
     gn = eqx.nn.GroupNorm(groups=4, channels=128)
     x = jrandom.uniform(getkey(), (128,))
     assert gn(x).shape == (128,)
+
+    gn = eqx.nn.GroupNorm(groups=4, channels=128, dtype=jnp.bfloat16)
+    x = jrandom.uniform(getkey(), (128,), dtype=jnp.bfloat16)
+    assert gn(x).dtype == jnp.bfloat16
 
     gn = eqx.nn.GroupNorm(groups=4, channels=128)
     x = jrandom.uniform(getkey(), (128, 4, 5))
@@ -931,7 +1101,8 @@ def test_group_norm(getkey):
         gn = eqx.nn.GroupNorm(groups=4, channels=None, channelwise_affine=True)
 
 
-def test_batch_norm(getkey):
+@pytest.mark.parametrize("mode", ("ema", "batch"))
+def test_batch_norm(getkey, mode):
     x0 = jrandom.uniform(getkey(), (5,))
     x1 = jrandom.uniform(getkey(), (10, 5))
     x2 = jrandom.uniform(getkey(), (10, 5, 6))
@@ -939,14 +1110,19 @@ def test_batch_norm(getkey):
 
     # Test that it works with a single vmap'd axis_name
 
-    bn = eqx.nn.BatchNorm(5, "batch")
+    bn = eqx.nn.BatchNorm(5, "batch", mode=mode)
     state = eqx.nn.State(bn)
     vbn = jax.vmap(bn, axis_name="batch", in_axes=(0, None), out_axes=(0, None))
 
     for x in (x1, x2, x3):
         out, state = vbn(x, state)
         assert out.shape == x.shape
-        running_mean, running_var = state.get(bn.state_index)
+        if mode == "ema":
+            assert bn.ema_state_index is not None
+            running_mean, running_var = state.get(bn.ema_state_index)
+        else:
+            assert bn.batch_state_index is not None
+            running_mean, running_var = state.get(bn.batch_state_index)
         assert running_mean.shape == (5,)
         assert running_var.shape == (5,)
 
@@ -967,13 +1143,18 @@ def test_batch_norm(getkey):
         in_axes=(0, None),
     )(x2, state)
     assert out.shape == x2.shape
-    running_mean, running_var = state.get(bn.state_index)
+    if mode == "ema":
+        assert bn.ema_state_index is not None
+        running_mean, running_var = state.get(bn.ema_state_index)
+    else:
+        assert bn.batch_state_index is not None
+        running_mean, running_var = state.get(bn.batch_state_index)
     assert running_mean.shape == (10, 5)
     assert running_var.shape == (10, 5)
 
     # Test that it handles multiple axis_names
 
-    vvbn = eqx.nn.BatchNorm(6, ("batch1", "batch2"))
+    vvbn = eqx.nn.BatchNorm(6, ("batch1", "batch2"), mode=mode)
     vvstate = eqx.nn.State(vvbn)
     for axis_name in ("batch1", "batch2"):
         vvbn = jax.vmap(
@@ -981,14 +1162,19 @@ def test_batch_norm(getkey):
         )
     out, out_vvstate = vvbn(x2, vvstate)
     assert out.shape == x2.shape
-    running_mean, running_var = out_vvstate.get(vvbn.state_index)
+    if mode == "ema":
+        assert vvbn.ema_state_index is not None
+        running_mean, running_var = out_vvstate.get(vvbn.ema_state_index)
+    else:
+        assert vvbn.batch_state_index is not None
+        running_mean, running_var = out_vvstate.get(vvbn.batch_state_index)
     assert running_mean.shape == (6,)
     assert running_var.shape == (6,)
 
     # Test that it normalises
 
     x1alt = jrandom.normal(jrandom.PRNGKey(5678), (10, 5))  # avoid flakey test
-    bn = eqx.nn.BatchNorm(5, "batch", channelwise_affine=False)
+    bn = eqx.nn.BatchNorm(5, "batch", channelwise_affine=False, mode=mode)
     state = eqx.nn.State(bn)
     vbn = jax.vmap(bn, axis_name="batch", in_axes=(0, None), out_axes=(0, None))
     out, state = vbn(x1alt, state)
@@ -999,9 +1185,19 @@ def test_batch_norm(getkey):
 
     # Test that the statistics update during training
     out, state = vbn(x1, state)
-    running_mean, running_var = state.get(bn.state_index)
+    if mode == "ema":
+        assert bn.ema_state_index is not None
+        running_mean, running_var = state.get(bn.ema_state_index)
+    else:
+        assert bn.batch_state_index is not None
+        running_mean, running_var = state.get(bn.batch_state_index)
     out, state = vbn(3 * x1 + 10, state)
-    running_mean2, running_var2 = state.get(bn.state_index)
+    if mode == "ema":
+        assert bn.ema_state_index is not None
+        running_mean2, running_var2 = state.get(bn.ema_state_index)
+    else:
+        assert bn.batch_state_index is not None
+        running_mean2, running_var2 = state.get(bn.batch_state_index)
     assert not jnp.allclose(running_mean, running_mean2)
     assert not jnp.allclose(running_var, running_var2)
 
@@ -1010,7 +1206,12 @@ def test_batch_norm(getkey):
     ibn = eqx.nn.inference_mode(bn, value=True)
     vibn = jax.vmap(ibn, axis_name="batch", in_axes=(0, None), out_axes=(0, None))
     out, state = vibn(4 * x1 + 20, state)
-    running_mean3, running_var3 = state.get(bn.state_index)
+    if mode == "ema":
+        assert bn.ema_state_index is not None
+        running_mean3, running_var3 = state.get(bn.ema_state_index)
+    else:
+        assert bn.batch_state_index is not None
+        running_mean3, running_var3 = state.get(bn.batch_state_index)
     assert jnp.array_equal(running_mean2, running_mean3)
     assert jnp.array_equal(running_var2, running_var3)
 
@@ -1022,6 +1223,16 @@ def test_batch_norm(getkey):
         return jnp.sum(out)
 
     f(jrandom.normal(getkey(), (1, 5)))
+
+
+# https://github.com/patrick-kidger/equinox/issues/1010
+def test_batch_norm_zero_training_steps(getkey):
+    bn, state = eqx.nn.make_with_state(eqx.nn.BatchNorm)(
+        input_size=3, axis_name="foo", mode="batch", inference=True
+    )
+    x = jrandom.normal(getkey(), (5, 3))
+    out, _ = jax.vmap(bn, in_axes=(0, None), axis_name="foo")(x, state)
+    assert jnp.allclose(x, out)
 
 
 def test_spectral_norm(getkey):
@@ -1181,7 +1392,7 @@ def test_weight_norm(getkey):
     out_weight_norm = weight_norm_linear(x)
     out_linear = linear(x)
 
-    assert jnp.allclose(out_weight_norm, out_linear)
+    assert jnp.allclose(out_weight_norm, out_linear, atol=1e-4, rtol=1e-4)
 
     # Axis == None
     linear = eqx.nn.Linear(4, 4, key=getkey())
@@ -1193,7 +1404,7 @@ def test_weight_norm(getkey):
     out_weight_norm = weight_norm_linear(x)
     out_linear = linear(x)
 
-    assert jnp.allclose(out_weight_norm, out_linear)
+    assert jnp.allclose(out_weight_norm, out_linear, atol=1e-4, rtol=1e-4)
 
     # Conv3d (ndim weight matrices > 2)
     conv = eqx.nn.Conv3d(2, 3, 3, key=getkey())
@@ -1202,7 +1413,7 @@ def test_weight_norm(getkey):
     out_weight_norm = weight_norm_conv(x)
     out_conv = conv(x)
 
-    assert jnp.allclose(out_weight_norm, out_conv)
+    assert jnp.allclose(out_weight_norm, out_conv, atol=1e-4, rtol=1e-4)
 
     # Grads get generated for reparametrized weights, not original
     grads = eqx.filter_grad(lambda model, x: jnp.mean(model(x)))(
@@ -1211,6 +1422,29 @@ def test_weight_norm(getkey):
 
     assert jnp.any(grads.layer.weight)
     assert jnp.any(grads.g)
+
+
+# https://github.com/patrick-kidger/equinox/issues/965
+def test_weight_norm_equality(getkey):
+    linear = eqx.nn.Linear(4, 4, key=getkey())
+
+    for axis in (0, None):
+        m1 = eqx.nn.WeightNorm(layer=linear, weight_name="weight", axis=axis)
+        m2 = eqx.nn.WeightNorm(layer=linear, weight_name="weight", axis=axis)
+        assert eqx.tree_equal(m1, m2)
+
+    num_traces = 0
+
+    @eqx.filter_jit
+    def f(model, x):
+        nonlocal num_traces
+        num_traces += 1
+        return model(x)
+
+    x = jrandom.normal(getkey(), (4,))
+    f(eqx.nn.WeightNorm(layer=linear), x)
+    f(eqx.nn.WeightNorm(layer=linear), x)
+    assert num_traces == 1
 
 
 def test_maxpool1d():
@@ -1387,7 +1621,7 @@ def test_poolbackprop():
 
 def test_poolnetworkbackprop(getkey):
     class CNN(eqx.Module):
-        conv_layer: list[Union[eqx.nn.Conv2d, eqx.nn.MaxPool2d]]
+        conv_layer: list[eqx.nn.Conv2d | eqx.nn.MaxPool2d]
         linear_layers: list[eqx.nn.Linear]
 
         def __init__(self, key):
@@ -1455,12 +1689,13 @@ def test_prelu(getkey):
 
 def test_rope_embeddings_shapes(getkey):
     embedding_size = 32
-    rope_embeddings = eqx.nn.RotaryPositionalEmbedding(embedding_size)
 
     n_heads = 4
     seq_length = 8
     query_size = 32
     key_size = 32
+
+    rope_embeddings = eqx.nn.RotaryPositionalEmbedding(embedding_size)
 
     query_heads = jax.random.normal(
         key=getkey(), shape=(seq_length, n_heads, query_size)
@@ -1501,9 +1736,20 @@ def test_rope_embeddings_freqs_cis():
     embedding_size = 8
     seq_length = 16
     freqs_cis = eqx.nn.RotaryPositionalEmbedding.precompute_freqs_cis(
-        embedding_size, seq_length, theta
+        embedding_size, seq_length, theta, jnp.float32
     )
-    assert jnp.allclose(freqs_cis, expected_freqs_cis, atol=1e-4)
+    assert jnp.allclose(
+        freqs_cis[0], expected_freqs_cis.real, atol=1e-4
+    ) and jnp.allclose(freqs_cis[1], expected_freqs_cis.imag, atol=1e-4)
+
+    freqs_cis = eqx.nn.RotaryPositionalEmbedding.precompute_freqs_cis(
+        embedding_size, seq_length, theta, jnp.float16
+    )
+    assert jnp.allclose(
+        freqs_cis[0].astype(jnp.float32), expected_freqs_cis.real, rtol=1e-2
+    ) and jnp.allclose(
+        freqs_cis[1].astype(jnp.float32), expected_freqs_cis.imag, rtol=1e-2
+    )
 
 
 def test_rope_embeddings_values():
@@ -1538,7 +1784,61 @@ def test_rope_embeddings_values():
         seq_length, embedding_size
     )
 
-    rope_embeddings = eqx.nn.RotaryPositionalEmbedding(embedding_size)
+    rope_embeddings = eqx.nn.RotaryPositionalEmbedding(
+        embedding_size, dtype=jnp.float32
+    )
     res = rope_embeddings(x)
 
     assert jnp.allclose(res, expected_values, atol=1e-6)
+
+    with jax.numpy_dtype_promotion("standard"):
+        # Test that high precision rope on low precision input is more
+        # accurate than low precision rope on low precision input
+        res = rope_embeddings(x.astype(jnp.float16))
+        assert jnp.allclose(
+            res.astype(jnp.float16),
+            expected_values.astype(jnp.float16),
+            rtol=1e-3,
+        )
+
+    # check that without dtype promotion we throw an error
+    with pytest.raises(TypePromotionError):
+        rope_embeddings(x.astype(jnp.float16))
+
+    rope_embeddings = eqx.nn.RotaryPositionalEmbedding(
+        embedding_size, dtype=jnp.float16
+    )
+    res = rope_embeddings(x.astype(jnp.float16))
+
+    assert (
+        jnp.allclose(res.astype(jnp.float32), expected_values, rtol=1e-2)
+        and res.dtype == jnp.float16
+    )
+
+
+def test_rope_embeddings_theta_cache():
+    x = jnp.ones((16, 8))
+    rope_a = eqx.nn.RotaryPositionalEmbedding(8, theta=10_000.0)
+    rope_b = eqx.nn.RotaryPositionalEmbedding(8, theta=100_000.0)
+    res_a = rope_a(x)
+    res_b = rope_b(x)
+    assert not jnp.allclose(res_a, res_b)
+    eqx.clear_caches()
+    assert jnp.allclose(res_b, rope_b(x))
+
+
+def test_rope_with_offset():
+    embedding_size = 2
+
+    rotary_emb = eqx.nn.RotaryPositionalEmbedding(embedding_size=embedding_size)
+    rotary_emb = eqx.filter_jit(rotary_emb)
+
+    out1 = rotary_emb(jnp.ones(shape=(2, embedding_size)), offset=1)
+    out2 = rotary_emb(jnp.ones(shape=(3, embedding_size)), offset=2)
+
+    assert jnp.allclose(out1[1], out2[0])
+
+    out3 = rotary_emb(jnp.ones(shape=(2, embedding_size)), offset=1)
+    out4 = rotary_emb(jnp.ones(shape=(3, embedding_size)), offset=1)
+
+    assert jnp.allclose(out3, out4[:2])

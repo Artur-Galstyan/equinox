@@ -1,14 +1,19 @@
+import atexit
 import functools as ft
 import inspect
-import sys
+import logging
+import os
 import warnings
 from collections.abc import Callable
 from typing import Any, Literal, overload, TypeVar
 from typing_extensions import ParamSpec
 
 import jax
+import jax._src.dispatch
 import jax._src.traceback_util as traceback_util
 import jax.core
+import jax.errors
+import jax.numpy as jnp
 from jaxtyping import PyTree
 
 from ._compile_utils import (
@@ -23,7 +28,6 @@ from ._custom_types import sentinel
 from ._deprecate import deprecated_0_10
 from ._doc_utils import doc_remove_args
 from ._filters import combine, is_array, partition
-from ._misc import currently_jitting
 from ._module import field, Module, module_update_wrapper, Partial, Static
 
 
@@ -50,7 +54,8 @@ def _filter_jit_cache(fun_names, jitkwargs):
         assert dummy_arg is None
         out = fun(*args, **kwargs)
         dynamic_out, static_out = partition(out, is_array)
-        return dynamic_out, Static(static_out)
+        marker = jnp.array(0)
+        return marker, dynamic_out, Static(static_out)
 
     fun_name, fun_qualname = fun_names
     fun_wrapped.__name__ = fun_name
@@ -99,17 +104,41 @@ def _preprocess(info, args, kwargs, return_static: bool = False):
 
 
 def _postprocess(out):
-    dynamic_out, static_out = out
+    _, dynamic_out, static_out = out
     return combine(dynamic_out, static_out.value)
 
 
 try:
-    # Not public API, so wrap in a try-except for forward compatibility.
-    XlaRuntimeError = jax.lib.xla_extension.XlaRuntimeError  # pyright: ignore
-except Exception:
-    # Unused dummy
-    class XlaRuntimeError(Exception):
-        pass
+    # Added in JAX 0.4.34.
+    JaxRuntimeError = jax.errors.JaxRuntimeError  # pyright: ignore
+except AttributeError:
+    try:
+        # Forward compatibility in case they ever decide to fix the capitalization.
+        JaxRuntimeError = jax.errors.JAXRuntimeError  # pyright: ignore
+    except AttributeError:
+        # Not public API, so wrap in a try-except for forward compatibility.
+        try:
+            JaxRuntimeError = jax.lib.xla_extension.XlaRuntimeError  # pyright: ignore
+        except Exception:
+            # Unused dummy
+            class JaxRuntimeError(Exception):
+                pass
+
+
+try:
+    wait_for_tokens = jax._src.dispatch.wait_for_tokens
+except AttributeError:
+    pass  # forward compatibility
+else:
+    # Fix for https://github.com/patrick-kidger/diffrax/issues/506
+    def wait_for_tokens2():
+        try:
+            wait_for_tokens()
+        except (JaxRuntimeError, ValueError):
+            pass
+
+    atexit.unregister(wait_for_tokens)
+    atexit.register(wait_for_tokens2)
 
 
 # This is the class we use to raise runtime errors from `eqx.error_if`.
@@ -129,8 +158,7 @@ EquinoxRuntimeError.__module__ = "builtins"
 # tools, e.g. debuggers. So what we have here is a compromise.
 
 
-last_msg = None
-last_stack = None
+last_error_info: None | tuple[str, list[bytes | str]] = None
 
 
 _on_error_msg = """Above is the stack outside of JIT. Below is the stack inside of JIT:
@@ -153,17 +181,12 @@ to print its value, etc.
 """
 
 
-class _FilteredStderr:
-    def __init__(self, stderr):
-        self.stderr = stderr
-
-    def write(self, data: str):
-        if "_EquinoxRuntimeError" not in data:
-            self.stderr.write(data)
-
-    # Needed for the PyCharm debugger, see #827.
-    def flush(self):
-        self.stderr.flush()
+class _FilterCallback(logging.Filterer):
+    def filter(self, record: logging.LogRecord):
+        return not (
+            record.name == "jax._src.callback"
+            and record.getMessage() == "jax.pure_callback failed"
+        )
 
 
 class _JitWrapper(Module):
@@ -180,70 +203,10 @@ class _JitWrapper(Module):
     def __wrapped__(self):
         return hashable_combine(self._dynamic_fun, self._static_fun)
 
-    def _call(self, is_lower, args, kwargs):
-        __tracebackhide__ = True
-        # Used by our error messages when figuring out where to stop walking the stack.
-        if not currently_jitting():
-            __equinox_filter_jit__ = True  # noqa: F841
-        info = (
-            self._signature,
-            self._dynamic_fun,
-            self._static_fun,
-            self.donate_first,
-            self.donate_rest,
-        )
-        dynamic_donate, dynamic_nodonate, static = _preprocess(  # pyright: ignore
-            info, args, kwargs, return_static=True
-        )
-        if is_lower:
-            return Lowered(
-                self._cached.lower(dynamic_donate, dynamic_nodonate, static),
-                info,
-                _preprocess,  # pyright: ignore
-                _postprocess,  # pyright: ignore
-            )
-        else:
-            # Filter stderr to remove our default "you don't seem to be using
-            # `equinox.filter_jit`" message. (Which also comes with a misleading stack
-            # trace from XLA.)
-            stderr = sys.stderr
-            sys.stderr = _FilteredStderr(stderr)
-            try:
-                if self.filter_warning:
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings(
-                            "ignore", message="Some donated buffers were not usable*"
-                        )
-                        out = self._cached(dynamic_donate, dynamic_nodonate, static)
-                else:
-                    out = self._cached(dynamic_donate, dynamic_nodonate, static)
-            except XlaRuntimeError as e:
-                # Catch Equinox's runtime errors, and re-raise them with actually useful
-                # information. (By default XlaRuntimeError produces a lot of terrifying
-                # but useless information.)
-                if (
-                    last_msg is not None
-                    and last_stack is not None
-                    and "_EquinoxRuntimeError: " in str(e)
-                ):
-                    # We check `last_msg` and `last_stack` just in case. I'm not sure
-                    # what happens in distributed/multiprocess environments. Is the
-                    # callback necessarily executed in the same interpreter as we are in
-                    # here?
-                    raise EquinoxRuntimeError(
-                        _on_error_msg.format(msg=last_msg, stack=last_stack)
-                    ) from None
-                    # `from None` to hide the large but uninformative XlaRuntimeError.
-                else:
-                    raise
-            finally:
-                sys.stderr = stderr
-            return _postprocess(out)
-
     def __call__(self, /, *args, **kwargs):
         __tracebackhide__ = True
         try:
-            return self._call(False, args, kwargs)
+            return _call(self, False, args, kwargs)
         except EquinoxRuntimeError as e:
             # Use a two-part try/except here and in `_call` to delete the
             # `raise EquinoxRuntimeError` line from the stack trace.
@@ -251,13 +214,84 @@ class _JitWrapper(Module):
             raise
 
     def lower(self, /, *args, **kwargs) -> Lowered:
-        return self._call(True, args, kwargs)
+        return _call(self, True, args, kwargs)
 
     def __get__(self, instance, owner):
         del owner
         if instance is None:
             return self
         return Partial(self, instance)
+
+
+# _call is not a member method of _JitWrapper (even though it effectively does
+# the same thing) because we want to avoid _call being wrapped in a _wrap_method,
+# which adds about ~90μs per call.
+def _call(jit_wrapper: _JitWrapper, is_lower, args, kwargs):
+    __tracebackhide__ = True
+    __equinox_jit_id__ = os.urandom(16)
+    info = (
+        jit_wrapper._signature,
+        jit_wrapper._dynamic_fun,
+        jit_wrapper._static_fun,
+        jit_wrapper.donate_first,
+        jit_wrapper.donate_rest,
+    )
+    dynamic_donate, dynamic_nodonate, static = _preprocess(  # pyright: ignore
+        info, args, kwargs, return_static=True
+    )
+    if is_lower:
+        return Lowered(
+            jit_wrapper._cached.lower(dynamic_donate, dynamic_nodonate, static),
+            info,
+            _preprocess,  # pyright: ignore
+            _postprocess,  # pyright: ignore
+        )
+    else:
+        filter = _FilterCallback()
+        callback_logger = logging.getLogger("jax._src.callback")
+        callback_logger.addFilter(filter)
+        try:
+            if jit_wrapper.filter_warning:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore", message="Some donated buffers were not usable*"
+                    )
+                    marker, _, _ = out = jit_wrapper._cached(
+                        dynamic_donate, dynamic_nodonate, static
+                    )
+            else:
+                marker, _, _ = out = jit_wrapper._cached(
+                    dynamic_donate, dynamic_nodonate, static
+                )
+            # We need to include the explicit `isinstance(marker, jax.Array)` check due
+            # to https://github.com/patrick-kidger/equinox/issues/988
+            if not isinstance(marker, jax.core.Tracer) and isinstance(
+                marker, jax.Array
+            ):
+                marker.block_until_ready()
+        except (JaxRuntimeError, ValueError) as e:
+            # Catch Equinox's runtime errors, and re-raise them with actually useful
+            # information. (By default XlaRuntimeError produces a lot of terrifying
+            # but useless information.)
+            if last_error_info is not None and "_EquinoxRuntimeError: " in str(e):
+                last_msg, last_stack = last_error_info
+                last_stack_pieces: list[str] = []
+                for id_or_str in last_stack:
+                    if type(id_or_str) is str:
+                        last_stack_pieces.append(id_or_str)
+                    else:
+                        if id_or_str == __equinox_jit_id__:
+                            break
+                last_stack_str = "".join(reversed(last_stack_pieces))
+                raise EquinoxRuntimeError(
+                    _on_error_msg.format(msg=last_msg, stack=last_stack_str)
+                ) from None
+                # `from None` to hide the large but uninformative XlaRuntimeError.
+            else:
+                raise
+        finally:
+            callback_logger.removeFilter(filter)
+        return _postprocess(out)
 
 
 @overload
@@ -293,8 +327,8 @@ def filter_jit(
 
     **Arguments:**
 
-    - `fun` is a pure function to JIT compile.
-    - `donate` indicates whether the buffers of JAX arrays are donated or not. It
+    - `fun`: is a pure function to JIT compile.
+    - `donate`: indicates whether the buffers of JAX arrays are donated or not. It
         should either be:
         - `'all'`: donate all arrays and suppress all warnings about unused buffers;
         - `'all-except-first'`: donate all arrays except for those in the first
@@ -347,11 +381,18 @@ def filter_jit(
     deprecated_0_10(jitkwargs, "kwargs")
     deprecated_0_10(jitkwargs, "out")
     if any(
-        x in jitkwargs for x in ("static_argnums", "static_argnames", "donate_argnums")
+        x in jitkwargs
+        for x in (
+            "static_argnums",
+            "static_argnames",
+            "donate_argnums",
+            "in_shardings",
+            "out_shardings",
+        )
     ):
         raise ValueError(
-            "`jitkwargs` cannot contain 'static_argnums', 'static_argnames' or "
-            "'donate_argnums'"
+            "`jitkwargs` cannot contain 'static_argnums', 'static_argnames', "
+            "'donate_argnums', 'in_shardings', or 'out_shardings'."
         )
     signature = inspect.signature(fun)
 

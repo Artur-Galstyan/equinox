@@ -4,6 +4,7 @@ import equinox as eqx
 import equinox.internal as eqxi
 import jax
 import jax.core
+import jax.extend.core
 import jax.interpreters.ad as ad
 import jax.interpreters.batching as batching
 import jax.interpreters.mlir as mlir
@@ -14,7 +15,7 @@ from .helpers import tree_allclose
 
 
 def test_call():
-    newprim_p = jax.core.Primitive("newprim")
+    newprim_p = jax.extend.core.Primitive("newprim")
     newprim_p.multiple_results = True
 
     newprim = ft.partial(eqxi.filter_primitive_bind, newprim_p)
@@ -136,11 +137,11 @@ def test_call():
 def test_vprim():
     def impl(x):
         assert x.shape == (2,)
-        return 2 * x, jnp.concatenate([x, jnp.flip(x)])
+        return [2 * x, jnp.concatenate([x, jnp.flip(x)])]
 
     def abstract(x):
         assert type(x) is jax.core.ShapedArray
-        return x, jax.core.ShapedArray((4,), x.dtype)
+        return [x, jax.core.ShapedArray((4,), x.dtype)]
 
     def jvp(primals, tangents):
         (x,) = primals

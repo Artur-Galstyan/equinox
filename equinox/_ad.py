@@ -1,23 +1,14 @@
 import functools as ft
 import types
-import typing
 import warnings
 from collections.abc import Callable, Sequence
-from typing import (
-    Any,
-    cast,
-    Literal,
-    Optional,
-    overload,
-    TYPE_CHECKING,
-    TypeVar,
-    Union,
-)
+from typing import Any, cast, Literal, overload, TypeVar
 from typing_extensions import ParamSpec
 
 import jax
 import jax._src.traceback_util as traceback_util
 import jax.core
+import jax.extend.core
 import jax.interpreters.ad as ad
 import jax.numpy as jnp
 import jax.tree_util as jtu
@@ -35,6 +26,7 @@ from ._filters import (
 )
 from ._make_jaxpr import filter_make_jaxpr
 from ._module import field, Module, module_update_wrapper, Partial, Static
+from ._pretty_print import tree_pformat
 from ._tree import tree_equal
 
 
@@ -101,17 +93,18 @@ class _GradWrapper(Module):
             return grad
 
     def __get__(self, instance, owner):
+        del owner
         if instance is None:
             return self
         return Partial(self, instance)
 
 
-_Scalar = Union[float, complex, Float[ArrayLike, ""], Complex[ArrayLike, ""]]
+_Scalar = float | complex | Float[ArrayLike, ""] | Complex[ArrayLike, ""]
 _ScalarTy = TypeVar("_ScalarTy", bound=_Scalar)
 
 
 @overload
-def filter_value_and_grad(
+def filter_value_and_grad(  # pyright: ignore[reportOverlappingOverload]
     *,
     has_aux: Literal[False] = False,
 ) -> Callable[[Callable[_P, _ScalarTy]], Callable[_P, tuple[_ScalarTy, PyTree]]]: ...
@@ -158,7 +151,7 @@ def filter_value_and_grad(
 
     **Arguments:**
 
-    - `fun` is a pure function to differentiate.
+    - `fun`: is a pure function to differentiate.
     - `has_aux`: if `True` then `fun` should return a pair; the first element is the
         output to be differentiated and the second element is auxiliary data.
 
@@ -189,7 +182,7 @@ def filter_value_and_grad(
 
 
 @overload
-def filter_grad(
+def filter_grad(  # pyright: ignore[reportOverlappingOverload]
     *,
     has_aux: Literal[False] = False,
 ) -> Callable[[Callable[_P, _Scalar]], Callable[_P, PyTree[Float[Array, "..."]]]]: ...
@@ -234,7 +227,7 @@ def filter_grad(fun=sentinel, *, has_aux: bool = False, **gradkwargs):
 
     **Arguments:**
 
-    - `fun` is a pure function to differentiate.
+    - `fun`: is a pure function to differentiate.
     - `has_aux`: if `True` then `fun` should return a pair; the first element is the
         output to be differentiated and the second element is auxiliary data.
 
@@ -339,7 +332,12 @@ def filter_jvp(
     flat_tangents = jtu.tree_leaves(tangents)  # all non-None tangents are dynamic
 
     def _fn(*_flat_dynamic):
-        _main = jax.core.find_top_trace(_flat_dynamic).main
+        if hasattr(jax.extend.core, "find_top_trace"):
+            _top_trace = jax.extend.core.find_top_trace(_flat_dynamic)  # pyright: ignore[reportAttributeAccessIssue]
+        else:
+            _top_trace = jax.core.find_top_trace(_flat_dynamic)  # pyright: ignore[reportAttributeAccessIssue]
+        assert _top_trace is not None
+        _main = _top_trace.main
         _dynamic = jtu.tree_unflatten(treedef, _flat_dynamic)
         _in = combine(_dynamic, static_primals)
         _out = fn(*_in, **kwargs)
@@ -537,21 +535,34 @@ _T = TypeVar("_T")
 _FlatPyTree = tuple[list[_T], PyTreeDef]
 
 
+def _strip_weak_dtype(
+    tree: PyTree[jax.ShapeDtypeStruct],
+) -> PyTree[jax.ShapeDtypeStruct]:
+    return jtu.tree_map(
+        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=x.sharding), tree
+    )
+
+
 def _check_closure_convert_input(self, args, kwargs):
     self_in_dynamic_struct = _unflatten(self.in_dynamic_struct)
     self_in_static = _unflatten(self.in_static)
     in_dynamic, in_static = partition((args, kwargs), is_array)
-    in_dynamic_struct = jax.eval_shape(lambda: in_dynamic)
+    in_dynamic_struct = _strip_weak_dtype(jax.eval_shape(lambda: in_dynamic))
     # `is` because `tree_equal` may return a tracer
     if tree_equal(in_dynamic_struct, self_in_dynamic_struct) is not True:
         raise ValueError(
             "Closure-converted function called with different dynamic arguments to "
-            "the example arguments provided."
+            "the example arguments provided:\n\n"
+            f"Called with: {tree_pformat(in_dynamic)}\n\n"
+            "Closure-converted with: "
+            f"{tree_pformat(self_in_dynamic_struct, struct_as_array=True)}"
         )
     if tree_equal(in_static, self_in_static) is not True:
         raise ValueError(
             "Closure-converted function called with different static arguments to "
-            "the example arguments provided."
+            "the example arguments provided:\n\n"
+            f"Called with: {tree_pformat(in_static)}\n\n"
+            f"Closure-converted with: {tree_pformat(self_in_static)}"
         )
     return in_dynamic
 
@@ -582,7 +593,7 @@ class _ClosureConvert(Module):
     # Important that `jaxpr` be a leaf (and not static), so that it is a tuple element
     # when passing through `filter_primitive_bind` and thus visible to
     # `jax.core.subjaxprs`
-    jaxpr: jax.core.Jaxpr
+    jaxpr: jax.extend.core.Jaxpr
     consts: PyTree[ArrayLike]  # Captured in the PyTree structure of _ClosureConvert
     in_dynamic_struct: _FlatPyTree[jax.ShapeDtypeStruct] = field(static=True)
     out_dynamic_struct: _FlatPyTree[jax.ShapeDtypeStruct] = field(static=True)
@@ -614,7 +625,7 @@ class _ClosureConvert(Module):
         )
         assert len(out_dynamic_flat) == len(out_dynamic_struct_flat)
         for o1, o2 in zip(out_dynamic_flat, out_dynamic_struct_flat):
-            assert jnp.shape(o1) == jnp.shape(o2)
+            assert jnp.shape(o1) == o2.shape
             assert jnp.result_type(o1) == jnp.result_type(o2)
         out = jtu.tree_unflatten(out_dynamic_treedef, out_dynamic_flat)
         out = combine(out, self_out_static)
@@ -634,7 +645,7 @@ def filter_closure_convert(fn: Callable[_P, _T], *args, **kwargs) -> Callable[_P
 
     - `fn`: The function to call. Will be called as `fun(*args, **kwargs)`.
     - `args`, `kwargs`: Example arguments at which to call the function. The function is
-        not actually evaluated on these arguments; all JAX arrays are subsituted for
+        not actually evaluated on these arguments; all JAX arrays are substituted for
         tracers. Note that Python builtins (`bool`, `int`, `float`, `complex`) are
         not substituted for tracers and are passed through as-is.
 
@@ -658,7 +669,29 @@ def filter_closure_convert(fn: Callable[_P, _T], *args, **kwargs) -> Callable[_P
         ```
     """
     in_dynamic, in_static = partition((args, kwargs), _is_struct)
-    in_dynamic_struct = jax.eval_shape(lambda: in_dynamic)
+    # Strip `weak_dtype`. This didn't used to exist on `jax.ShapeDtypeStruct`, and then
+    # got added: https://github.com/patrick-kidger/equinox/issues/854
+    #
+    # If we were writing from scratch then we'd keep this in, but for backward
+    # compatibility we instead strip it and treat every dtype as non-weak.
+    #
+    # Note that there are *two* kinds of backward compatibility we're thinking about
+    # here. The first more important kind of backward compatibility is when doing
+    # something like
+    # ```python
+    # g = filter_closure_convert(f, some_array)
+    # g(some_int)
+    # ```
+    # (which indeed is the case that's exploding in the linked issue above). This worked
+    # before! We'd like it to keep working.
+    #
+    # The second, less important, is how we trace the current function into a jaxpr.
+    # Whether we trace with weak dtypes or not can give different results.
+    # In this case, we all survived for a long time without even noticing we were doing
+    # this... so probably we're actually happy with either choice.
+    # Regardless, stripping weak dtypes here again means that we obtain the same
+    # behaviour as before.
+    in_dynamic_struct = _strip_weak_dtype(jax.eval_shape(lambda: in_dynamic))
     in_dynamic_struct = jtu.tree_flatten(in_dynamic_struct)
     in_static = jtu.tree_flatten(in_static)
     if isinstance(fn, types.FunctionType) and fn.__closure__ is None:
@@ -668,7 +701,7 @@ def filter_closure_convert(fn: Callable[_P, _T], *args, **kwargs) -> Callable[_P
     else:
         fn = cast(Callable[_P, _T], fn)
         closed_jaxpr, out_dynamic_struct, out_static = filter_make_jaxpr(fn)(
-            *args,  # pyright: ignore
+            *args,
             **kwargs,
         )
         jaxpr = closed_jaxpr.jaxpr
@@ -800,7 +833,7 @@ def _nondifferentiable_jvp(msg: str, primals, tangents):
 
 
 def nondifferentiable(
-    x: PyTree, *, name: Optional[str] = None, msg: Optional[str] = None
+    x: PyTree, *, name: str | None = None, msg: str | None = None
 ) -> PyTree:
     """Identity function, which raises an error if it is differentiated (in forward or
     reverse mode).
@@ -842,9 +875,18 @@ def _none_to_zero(ct, x):
         if x is None:
             return None
         else:
-            # No raising-to-vspace. JAX is internally inconsistent, and expects integers
-            # to have integer tangents from custom_{jvp,vjp} rules
-            aval = jax.core.raise_to_shaped(jax.core.get_aval(x))  # .at_least_vspace()
+            if hasattr(jax, "typeof"):
+                aval = jax.typeof(x)
+            else:
+                aval = jax.core.get_aval(x)  # pyright: ignore[reportAttributeAccessIssue]
+            if hasattr(aval, "to_tangent_aval"):
+                # Earlier versions of JAX were internally inconsistent, and expected
+                # e.g. integer primals to have integer tangents from `custom_{jvp,vjp}`
+                # rules.
+                # That changed in JAX 0.4.34.
+                aval = aval.to_tangent_aval()  # pyright: ignore
+            else:
+                aval = jax.core.raise_to_shaped(aval)  # pyright: ignore
             return jax.custom_derivatives.SymbolicZero(aval)
     else:
         return ct
@@ -906,8 +948,8 @@ class filter_custom_vjp:
 
     def __init__(self, fn):
         self.fn = fn
-        self.fn_fwd: Optional[Callable] = None
-        self.fn_bwd: Optional[Callable] = None
+        self.fn_fwd: Callable | None = None
+        self.fn_bwd: Callable | None = None
         self.fn_wrapped = None
 
     def def_fwd(self, fn_fwd):
@@ -1073,40 +1115,11 @@ class filter_custom_vjp:
         return combine(diff_array_out, nondiff_array_out, nonarray_out.value)
 
 
-if getattr(typing, "GENERATING_DOCUMENTATION", False) and not TYPE_CHECKING:
-    _filter_custom_jvp_doc = filter_custom_jvp.__doc__
-    _filter_custom_vjp_doc = filter_custom_vjp.__doc__
-
-    def def_jvp(fn_jvp):
-        pass
-
-    def defjvp(fn_jvp):
-        pass
-
-    def filter_custom_jvp(fn):
-        return types.SimpleNamespace(def_jvp=def_jvp, defjvp=defjvp)
-
-    def def_fwd(fn_fwd):
-        pass
-
-    def def_bwd(fn_bwd):
-        pass
-
-    def defvjp(fn_fwd, fn_bwd):
-        pass
-
-    def filter_custom_vjp(fn):
-        return types.SimpleNamespace(def_fwd=def_fwd, def_bwd=def_bwd, defvjp=defvjp)
-
-    filter_custom_jvp.__doc__ = _filter_custom_jvp_doc
-    filter_custom_vjp.__doc__ = _filter_custom_vjp_doc
-
-
 def filter_checkpoint(
     fun: Callable[_P, _T] = sentinel,
     *,
     prevent_cse: bool = True,
-    policy: Optional[Callable[..., bool]] = None,
+    policy: Callable[..., bool] | None = None,
 ) -> Callable[_P, _T]:
     """Filtered version of `jax.checkpoint`.
 
@@ -1140,14 +1153,14 @@ def filter_checkpoint(
 class _CheckpointWrapper(Module):
     _fun: Callable
     _prevent_cse: bool
-    _policy: Optional[Callable[..., bool]]
+    _policy: Callable[..., bool] | None
 
     def __init__(
         self,
         fun: Callable,
         *,
         prevent_cse: bool = True,
-        policy: Optional[Callable[..., bool]] = None,
+        policy: Callable[..., bool] | None = None,
     ):
         self._fun = fun
         self._prevent_cse = prevent_cse
