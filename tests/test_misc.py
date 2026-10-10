@@ -1,10 +1,22 @@
+import copy
+import pickle
+
 import equinox.internal as eqxi
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 import pytest
+from equinox._custom_types import sentinel
 
 from .helpers import random_pytree, tree_allclose, treedefs
+
+
+def test_sentinel():
+    assert isinstance(sentinel, sentinel)
+    assert repr(sentinel) == "SENTINEL"
+    assert copy.copy(sentinel) is sentinel
+    assert copy.deepcopy(sentinel) is sentinel
+    assert pickle.loads(pickle.dumps(sentinel)) is sentinel
 
 
 def test_ω_add_mul(getkey):
