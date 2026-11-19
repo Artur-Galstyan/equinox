@@ -1,5 +1,6 @@
 import copy
 import pickle
+from typing_extensions import Sentinel
 
 import equinox.internal as eqxi
 import jax
@@ -12,7 +13,7 @@ from .helpers import random_pytree, tree_allclose, treedefs
 
 
 def test_sentinel():
-    assert isinstance(sentinel, sentinel)
+    assert isinstance(sentinel, Sentinel)
     assert repr(sentinel) == "SENTINEL"
     assert copy.copy(sentinel) is sentinel
     assert copy.deepcopy(sentinel) is sentinel
